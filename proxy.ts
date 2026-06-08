@@ -1,6 +1,5 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
-import type { Database } from "./database.types";
 
 function getSupabaseEnv() {
   return {
@@ -10,11 +9,11 @@ function getSupabaseEnv() {
   };
 }
 
-export async function updateSession(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
   const { url, anonKey } = getSupabaseEnv();
 
-  const supabase = createServerClient<Database>(url, anonKey, {
+  const supabase = createServerClient(url, anonKey, {
     cookies: {
       getAll() {
         return request.cookies.getAll();
@@ -46,8 +45,7 @@ export async function updateSession(request: NextRequest) {
   }
 
   if (pathname === "/login" && user) {
-    const redirect =
-      request.nextUrl.searchParams.get("redirect") ?? "/";
+    const redirect = request.nextUrl.searchParams.get("redirect") ?? "/";
     const homeUrl = request.nextUrl.clone();
     homeUrl.pathname = redirect;
     homeUrl.search = "";
@@ -56,3 +54,9 @@ export async function updateSession(request: NextRequest) {
 
   return supabaseResponse;
 }
+
+export const config = {
+  matcher: [
+    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+  ],
+};
