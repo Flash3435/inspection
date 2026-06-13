@@ -2,7 +2,14 @@
 
 import type { ResolvedMediaItem } from "@/hooks/useResolvedMedia";
 import type { AudioTranscript } from "@/lib/types";
+import { getTranscriptForAudio } from "@/lib/transcript-utils";
 import { AudioNoteItem } from "./AudioNoteItem";
+
+export interface LocalAudioPlaybackEntry {
+  url: string;
+  mimeType: string;
+  filename: string;
+}
 
 interface MediaPreviewListProps {
   photos: ResolvedMediaItem[];
@@ -10,6 +17,8 @@ interface MediaPreviewListProps {
   loading?: boolean;
   transcripts?: Record<string, AudioTranscript>;
   compact?: boolean;
+  localAudioPlayback?: Record<string, LocalAudioPlaybackEntry>;
+  savedAudioIds?: ReadonlySet<string>;
   onRemovePhoto?: (id: string) => void;
   onRemoveAudio?: (id: string) => void;
   onTranscribe?: (audioId: string) => void;
@@ -23,6 +32,8 @@ export function MediaPreviewList({
   loading,
   transcripts = {},
   compact = false,
+  localAudioPlayback = {},
+  savedAudioIds,
   onRemovePhoto,
   onRemoveAudio,
   onTranscribe,
@@ -87,30 +98,46 @@ export function MediaPreviewList({
             {audio.length} audio note{audio.length !== 1 ? "s" : ""}
           </p>
           <ul className="space-y-2">
-            {audio.map((item) => (
-              <AudioNoteItem
-                key={item.id}
-                item={item}
-                transcript={transcripts[item.id]}
-                compact={compact}
-                onTranscribe={
-                  onTranscribe ? () => onTranscribe(item.id) : undefined
-                }
-                onUpdateTranscript={
-                  onUpdateTranscript
-                    ? (text) => onUpdateTranscript(item.id, text)
-                    : undefined
-                }
-                onClearTranscript={
-                  onClearTranscript
-                    ? () => onClearTranscript(item.id)
-                    : undefined
-                }
-                onRemove={
-                  onRemoveAudio ? () => onRemoveAudio(item.id) : undefined
-                }
-              />
-            ))}
+            {audio.map((item) => {
+              const local = localAudioPlayback[item.id];
+              const useLocalPlayback = Boolean(local);
+              const playbackItem: ResolvedMediaItem = local
+                ? {
+                    ...item,
+                    url: local.url,
+                    mimeType: local.mimeType,
+                    filename: local.filename,
+                  }
+                : item;
+              const transcript = getTranscriptForAudio(transcripts, item.id);
+
+              return (
+                <AudioNoteItem
+                  key={item.id}
+                  item={playbackItem}
+                  transcript={transcript}
+                  compact={compact}
+                  savedLocally={savedAudioIds?.has(item.id) ?? false}
+                  useLocalPlayback={useLocalPlayback}
+                  onTranscribe={
+                    onTranscribe ? () => onTranscribe(item.id) : undefined
+                  }
+                  onUpdateTranscript={
+                    onUpdateTranscript
+                      ? (text) => onUpdateTranscript(item.id, text)
+                      : undefined
+                  }
+                  onClearTranscript={
+                    onClearTranscript
+                      ? () => onClearTranscript(item.id)
+                      : undefined
+                  }
+                  onRemove={
+                    onRemoveAudio ? () => onRemoveAudio(item.id) : undefined
+                  }
+                />
+              );
+            })}
           </ul>
         </div>
       )}

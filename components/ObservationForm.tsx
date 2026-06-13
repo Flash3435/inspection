@@ -19,6 +19,7 @@ import {
 } from "@/lib/observation-drafting";
 import { transcribeAudio } from "@/lib/transcription";
 import {
+  pruneTranscripts,
   createTranscriptEntry,
 } from "@/lib/transcript-utils";
 import type { AudioTranscript, Observation, ObservationInput } from "@/lib/types";
@@ -115,6 +116,10 @@ export function ObservationForm({
   const [isGenerating, setIsGenerating] = useState(false);
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
   const [isUploadingAudio, setIsUploadingAudio] = useState(false);
+  const [localAudioPlayback, setLocalAudioPlayback] = useState<
+    Record<string, { url: string; mimeType: string; filename: string }>
+  >({});
+  const [savedAudioIds, setSavedAudioIds] = useState<Set<string>>(new Set());
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [error, setError] = useState("");
   const [draftReady, setDraftReady] = useState(isEditing || !isCloudMode);
@@ -122,7 +127,7 @@ export function ObservationForm({
   const storedObservation = getObservation(observationId);
   const transcripts =
     isEditing && storedObservation
-      ? storedObservation.transcripts
+      ? pruneTranscripts(storedObservation.transcripts, form.audioIds)
       : localTranscripts;
 
   const allMediaIds = [...form.photoIds, ...form.audioIds];
@@ -166,6 +171,51 @@ export function ObservationForm({
       }
     };
   }, [isEditing, observationId, mediaOptions, isCloudMode, deleteObservation]);
+
+  useEffect(() => {
+    setLocalTranscripts((prev) => pruneTranscripts(prev, form.audioIds));
+  }, [form.audioIds]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(localAudioPlayback).forEach((entry) => {
+        URL.revokeObjectURL(entry.url);
+      });
+    };
+  }, [localAudioPlayback]);
+
+  function cacheLocalAudioPlayback(
+    mediaId: string,
+    blob: Blob,
+    filename: string,
+    mimeType: string,
+  ) {
+    const url = URL.createObjectURL(blob);
+    setLocalAudioPlayback((prev) => {
+      const existing = prev[mediaId];
+      if (existing) URL.revokeObjectURL(existing.url);
+      return {
+        ...prev,
+        [mediaId]: { url, mimeType, filename },
+      };
+    });
+    setSavedAudioIds((prev) => new Set(prev).add(mediaId));
+  }
+
+  function clearLocalAudioPlayback(mediaId: string) {
+    setLocalAudioPlayback((prev) => {
+      const entry = prev[mediaId];
+      if (entry) URL.revokeObjectURL(entry.url);
+      const next = { ...prev };
+      delete next[mediaId];
+      return next;
+    });
+    setSavedAudioIds((prev) => {
+      const next = new Set(prev);
+      next.delete(mediaId);
+      return next;
+    });
+  }
 
   function handleChange(
     e: React.ChangeEvent<
@@ -267,6 +317,12 @@ export function ObservationForm({
           },
           mediaOptions,
         );
+        cacheLocalAudioPlayback(
+          saved.id,
+          file,
+          file.name,
+          file.type || "application/octet-stream",
+        );
         newIds.push(saved.id);
       }
       setForm((prev) => ({
@@ -305,6 +361,7 @@ export function ObservationForm({
         },
         mediaOptions,
       );
+      cacheLocalAudioPlayback(saved.id, blob, filename, mimeType);
       setForm((prev) => ({
         ...prev,
         audioIds: [...prev.audioIds, saved.id],
@@ -333,6 +390,7 @@ export function ObservationForm({
         return next;
       });
     }
+    clearLocalAudioPlayback(id);
     setForm((prev) => ({
       ...prev,
       audioIds: prev.audioIds.filter((audioId) => audioId !== id),
@@ -567,10 +625,12 @@ export function ObservationForm({
     }
     submittedRef.current = true;
 
-    const finalTranscripts =
+    const finalTranscripts = pruneTranscripts(
       isEditing && storedObservation
         ? storedObservation.transcripts
-        : localTranscripts;
+        : localTranscripts,
+      form.audioIds,
+    );
 
     onSubmit(
       {
@@ -839,6 +899,8 @@ export function ObservationForm({
                   audio={audio}
                   loading={mediaLoading && form.audioIds.length > 0}
                   transcripts={transcripts}
+                  localAudioPlayback={localAudioPlayback}
+                  savedAudioIds={savedAudioIds}
                   onRemoveAudio={removeAudio}
                   onTranscribe={handleTranscribe}
                   onUpdateTranscript={handleUpdateTranscript}

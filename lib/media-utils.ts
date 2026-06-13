@@ -213,15 +213,33 @@ export const RECORDER_MIME_CANDIDATES = [
   "audio/ogg",
 ] as const;
 
+/** MIME types allowed for recording on iPhone/iPad — WebM is excluded. */
+export const IOS_RECORDER_MIME_CANDIDATES = [
+  "audio/mp4",
+  "audio/aac",
+  "audio/mpeg",
+] as const;
+
 export interface BrowserAudioContext {
   userAgent: string;
   isIos: boolean;
   isSafari: boolean;
+  isAppleMobileWebKit: boolean;
+}
+
+export function isWebmOrOggMime(mimeType: string): boolean {
+  const base = baseMimeType(mimeType);
+  return base === "audio/webm" || base === "audio/ogg";
 }
 
 export function detectBrowserAudioContext(): BrowserAudioContext {
   if (typeof navigator === "undefined") {
-    return { userAgent: "", isIos: false, isSafari: false };
+    return {
+      userAgent: "",
+      isIos: false,
+      isSafari: false,
+      isAppleMobileWebKit: false,
+    };
   }
   const ua = navigator.userAgent;
   const isIos =
@@ -229,7 +247,29 @@ export function detectBrowserAudioContext(): BrowserAudioContext {
     (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   const isSafari =
     /Safari/i.test(ua) && !/Chrome|CriOS|FxiOS|EdgiOS/i.test(ua);
-  return { userAgent: ua, isIos, isSafari };
+  return {
+    userAgent: ua,
+    isIos,
+    isSafari,
+    isAppleMobileWebKit: isIos,
+  };
+}
+
+export function isAppleMobileWebKit(): boolean {
+  return detectBrowserAudioContext().isAppleMobileWebKit;
+}
+
+export function formatAudioFormatLabel(mimeType: string, filename: string): string {
+  const base = baseMimeType(mimeType);
+  const ext = extensionFromFilename(filename);
+  if (base === "audio/webm" || ext === "webm") return "WebM/Opus";
+  if (base === "audio/mp4" || ext === "m4a" || ext === "mp4") return "M4A/MP4";
+  if (base === "audio/mpeg" || ext === "mp3") return "MP3";
+  if (base === "audio/aac" || ext === "aac") return "AAC";
+  if (base === "audio/ogg" || ext === "ogg") return "OGG";
+  if (base === "audio/wav" || ext === "wav") return "WAV";
+  if (mimeType) return mimeType;
+  return "Unknown";
 }
 
 export function canPlayAudioMime(mimeType: string): boolean {
@@ -274,14 +314,25 @@ export function getRecorderMimeSupport(): Record<string, boolean> {
   );
 }
 
+function recorderMimeCandidates(): readonly string[] {
+  const { isAppleMobileWebKit } = detectBrowserAudioContext();
+  return isAppleMobileWebKit ? IOS_RECORDER_MIME_CANDIDATES : RECORDER_MIME_CANDIDATES;
+}
+
 export function getSupportedRecorderMimeType(): string | null {
   if (typeof MediaRecorder === "undefined") return null;
+  const candidates = recorderMimeCandidates();
   return (
-    RECORDER_MIME_CANDIDATES.find((type) =>
-      MediaRecorder.isTypeSupported(type),
-    ) ?? null
+    candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? null
   );
 }
+
+export function isRecorderSupportedOnPlatform(): boolean {
+  return getSupportedRecorderMimeType() !== null;
+}
+
+export const IOS_RECORDER_UNSUPPORTED_MESSAGE =
+  "Audio recording is not supported reliably in this browser. Please upload an audio file instead.";
 
 export function normalizeRecorderBlob(
   blob: Blob,

@@ -29,7 +29,7 @@ export async function transcribeAudio(
 
   if (mediaOptions && !media) {
     logAudioError("transcribe:not_found", { mediaId });
-    throw new Error("Audio file not found.");
+    throw new Error("Could not load the saved audio for transcription.");
   }
 
   if (media) {

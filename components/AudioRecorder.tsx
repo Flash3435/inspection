@@ -7,6 +7,10 @@ import {
   extensionForAudioMime,
   getRecorderMimeSupport,
   getSupportedRecorderMimeType,
+  IOS_RECORDER_UNSUPPORTED_MESSAGE,
+  isAppleMobileWebKit,
+  isRecorderSupportedOnPlatform,
+  isWebmOrOggMime,
   resolveRecordedMime,
 } from "@/lib/media-utils";
 import { formatDateTime } from "@/lib/utils";
@@ -36,7 +40,7 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
   const isSupported =
     typeof navigator !== "undefined" &&
     !!navigator.mediaDevices?.getUserMedia &&
-    mimeType !== null;
+    isRecorderSupportedOnPlatform();
 
   const [state, setState] = useState<RecorderState>("idle");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -87,6 +91,7 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
       ...browser,
       selectedMimeType: selectedMime,
       mimeSupport: getRecorderMimeSupport(),
+      iosSafeCandidatesOnly: browser.isAppleMobileWebKit,
     });
   }, []);
 
@@ -102,9 +107,7 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
   async function startRecording() {
     const selectedMime = getSupportedRecorderMimeType();
     if (!selectedMime) {
-      setError(
-        "In-browser recording is not supported in this browser. Use the upload option below instead.",
-      );
+      setError(IOS_RECORDER_UNSUPPORTED_MESSAGE);
       return;
     }
 
@@ -146,7 +149,25 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
           filename,
           size: blob.size,
           chunkCount: chunksRef.current.length,
+          isAppleMobileWebKit: isAppleMobileWebKit(),
         });
+
+        if (isAppleMobileWebKit() && isWebmOrOggMime(resolvedMime)) {
+          logAudioError("recorder:ios_webm_blocked", {
+            resolvedMimeType: resolvedMime,
+            filename,
+          });
+          chunksRef.current = [];
+          clearPreview();
+          setError(IOS_RECORDER_UNSUPPORTED_MESSAGE);
+          setState("idle");
+          stopStream();
+          if (timerRef.current) {
+            window.clearInterval(timerRef.current);
+            timerRef.current = null;
+          }
+          return;
+        }
 
         const normalizedBlob =
           blob.type === resolvedMime
@@ -199,6 +220,13 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
       mimeType,
       previewFilename,
     );
+
+    if (isAppleMobileWebKit() && isWebmOrOggMime(resolvedMime)) {
+      setError(IOS_RECORDER_UNSUPPORTED_MESSAGE);
+      setIsSaving(false);
+      return;
+    }
+
     const extension = extensionForAudioMime(resolvedMime);
     const filename =
       previewFilename || `recording-${timestampSlug()}.${extension}`;
@@ -223,8 +251,7 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
   if (!isSupported) {
     return (
       <p className="text-xs text-slate-500">
-        In-browser recording is not supported in this browser. Use the upload
-        option below instead.
+        {IOS_RECORDER_UNSUPPORTED_MESSAGE}
       </p>
     );
   }
@@ -273,6 +300,7 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
             filename={previewFilename}
             className="w-full"
             logContext="recorder:preview"
+            saved={false}
           />
           <div className="flex flex-wrap gap-2">
             <button

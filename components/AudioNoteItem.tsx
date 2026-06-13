@@ -4,6 +4,10 @@ import { useState } from "react";
 import { AudioPlayback } from "@/components/AudioPlayback";
 import type { ResolvedMediaItem } from "@/hooks/useResolvedMedia";
 import type { AudioTranscript } from "@/lib/types";
+import {
+  formatAudioFormatLabel,
+  isLikelyUnsupportedPlayback,
+} from "@/lib/media-utils";
 import { formatDateTime } from "@/lib/utils";
 
 function formatFileSize(bytes: number): string {
@@ -23,6 +27,8 @@ interface AudioNoteItemProps {
   item: ResolvedMediaItem;
   transcript?: AudioTranscript;
   compact?: boolean;
+  savedLocally?: boolean;
+  useLocalPlayback?: boolean;
   onTranscribe?: () => void;
   onUpdateTranscript?: (text: string) => void;
   onClearTranscript?: () => void;
@@ -33,6 +39,8 @@ export function AudioNoteItem({
   item,
   transcript,
   compact = false,
+  savedLocally = false,
+  useLocalPlayback = false,
   onTranscribe,
   onUpdateTranscript,
   onClearTranscript,
@@ -42,7 +50,13 @@ export function AudioNoteItem({
   const isTranscribing = transcript?.status === "transcribing";
   const isCompleted = transcript?.status === "completed";
   const isFailed = transcript?.status === "failed";
-  const canTranscribe = Boolean(onTranscribe) && !isTranscribing;
+  const canTranscribe =
+    Boolean(onTranscribe) && !isTranscribing && !isCompleted;
+  const formatLabel = formatAudioFormatLabel(item.mimeType, item.filename);
+  const playbackUnsupported = isLikelyUnsupportedPlayback(
+    item.mimeType,
+    item.filename,
+  );
 
   return (
     <li className="rounded-lg border border-slate-200 bg-white p-3">
@@ -54,11 +68,27 @@ export function AudioNoteItem({
           <p className="text-[10px] text-slate-400">
             {formatFileSize(item.size)} · {formatDateTime(item.createdAt)}
           </p>
-          {transcript && (
+          <p className="mt-1 text-[10px] text-slate-500">
+            Format: {formatLabel}
+            {playbackUnsupported && (
+              <span className="ml-1.5 rounded bg-amber-50 px-1.5 py-0.5 font-medium text-amber-700">
+                Unsupported on this browser
+              </span>
+            )}
+            {savedLocally && (
+              <span className="ml-1.5 rounded bg-emerald-50 px-1.5 py-0.5 font-medium text-emerald-700">
+                Saved
+              </span>
+            )}
+          </p>
+          {transcript && transcript.status !== "not_started" && (
             <p className="mt-1 text-[10px] text-slate-500">
               {STATUS_LABELS[transcript.status]}
               {isFailed && transcript.error ? ` — ${transcript.error}` : null}
             </p>
+          )}
+          {transcript?.status === "not_started" && (
+            <p className="mt-1 text-[10px] text-slate-500">Not transcribed</p>
           )}
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -90,11 +120,13 @@ export function AudioNoteItem({
       </div>
 
       <AudioPlayback
-        key={`${item.id}:${item.url}`}
+        key={`${item.id}:${item.url}:${useLocalPlayback}`}
         url={item.url}
         mimeType={item.mimeType}
         filename={item.filename}
         logContext="note"
+        saved={!useLocalPlayback}
+        useLocalPlayback={useLocalPlayback}
       />
 
       {(isCompleted || isFailed || isTranscribing) && (

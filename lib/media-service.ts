@@ -62,6 +62,37 @@ function getCloudContext(
   return null;
 }
 
+async function verifyUploadedAudioBlob(
+  client: Client,
+  saved: CloudMediaItem,
+  originalBlob: Blob,
+): Promise<void> {
+  try {
+    const downloaded = await downloadMediaBlob(client, saved.storagePath);
+    const sizeMatch = originalBlob.size === downloaded.size;
+    logAudio("save:verify", {
+      mediaId: saved.id,
+      originalSize: originalBlob.size,
+      downloadedSize: downloaded.size,
+      originalMime: saved.mimeType,
+      downloadedType: downloaded.type || "(empty)",
+      sizeMatch,
+    });
+    if (!sizeMatch) {
+      logAudioError("save:verify_size_mismatch", {
+        mediaId: saved.id,
+        originalSize: originalBlob.size,
+        downloadedSize: downloaded.size,
+      });
+    }
+  } catch (err) {
+    logAudioError("save:verify_failed", {
+      mediaId: saved.id,
+      storagePath: saved.storagePath,
+    }, err);
+  }
+}
+
 export async function saveMediaItem(
   input: MediaSaveInput,
   options: { userId?: string | null; client?: Client | null; id?: string },
@@ -141,6 +172,23 @@ export async function saveMediaItem(
         mediaId: saved.id,
         storagePath: saved.storagePath,
       });
+
+      if (input.type === "audio") {
+        logAudio("save:uploaded", {
+          mediaId: saved.id,
+          filename: saved.filename,
+          mimeType: saved.mimeType,
+          originalSize: prepared.size,
+          uploadedSize: saved.size,
+          storagePath: saved.storagePath,
+        });
+        await verifyUploadedAudioBlob(
+          cloud.client,
+          saved,
+          prepared.blob,
+        );
+      }
+
       return { id: saved.id };
     } catch (err) {
       logMediaError("save:cloud_failed", { mediaType: input.type }, err);

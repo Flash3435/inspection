@@ -32,3 +32,20 @@ export function createTranscriptEntry(
     ...overrides,
   };
 }
+
+export function getTranscriptForAudio(
+  transcripts: Record<string, AudioTranscript>,
+  audioId: string,
+): AudioTranscript | undefined {
+  const entry = transcripts[audioId];
+  if (!entry || entry.audioId !== audioId) return undefined;
+  return entry;
+}
+
+export function hasCompletedTranscript(
+  transcripts: Record<string, AudioTranscript>,
+  audioId: string,
+): boolean {
+  const entry = getTranscriptForAudio(transcripts, audioId);
+  return entry?.status === "completed" && Boolean(entry.text?.trim());
+}
