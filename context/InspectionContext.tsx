@@ -91,6 +91,10 @@ interface InspectionContextValue {
   findSampleProject: () => Project | undefined;
   seedSampleProject: (options?: { forceNew?: boolean }) => Promise<Project>;
   refreshData: () => Promise<void>;
+  ensureDraftObservation: (
+    projectId: string,
+    observationId: string,
+  ) => Promise<Observation>;
   mediaOptions: { userId: string | null; client: ReturnType<typeof useSupabase> | null };
 }
 
@@ -315,6 +319,44 @@ export function InspectionProvider({
       }
     },
     [user, supabase],
+  );
+
+  const ensureDraftObservation = useCallback(
+    async (projectId: string, observationId: string): Promise<Observation> => {
+      const existing = observations.find((obs) => obs.id === observationId);
+      if (existing) return existing;
+
+      if (!user) {
+        throw new Error("Sign in to add observations.");
+      }
+
+      const observation = await insertObservation(
+        supabase,
+        user.id,
+        projectId,
+        {
+          title: "Draft",
+          location: "",
+          note: "",
+          photoIds: [],
+          audioIds: [],
+          transcripts: {},
+          status: "general",
+          discipline: "general",
+          contractorActionRequired: false,
+          codeReferenceIds: [],
+        },
+        observationId,
+      );
+
+      setObservations((prev) => {
+        if (prev.some((obs) => obs.id === observationId)) return prev;
+        return [observation, ...prev];
+      });
+
+      return observation;
+    },
+    [observations, user, supabase],
   );
 
   const updateObservation = useCallback(
@@ -672,6 +714,7 @@ export function InspectionProvider({
       findSampleProject,
       seedSampleProject,
       refreshData,
+      ensureDraftObservation,
       mediaOptions,
     }),
     [
@@ -697,6 +740,7 @@ export function InspectionProvider({
       findSampleProject,
       seedSampleProject,
       refreshData,
+      ensureDraftObservation,
       mediaOptions,
     ],
   );

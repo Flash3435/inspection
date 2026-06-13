@@ -9,6 +9,7 @@ import {
   projectToInsertRow,
   projectInputToUpdateRow,
 } from "./mappers";
+import { logMedia } from "@/lib/media-diagnostics";
 import type { Observation, ObservationInput, Project, ProjectInput } from "@/lib/types";
 import { generateId } from "@/lib/utils";
 
@@ -103,6 +104,7 @@ export async function fetchObservationsForProject(
   if (mediaResult.error) throw mediaResult.error;
 
   const mediaByObservation = groupMediaIdsByObservation(mediaResult.data ?? []);
+  logProjectMediaLoadStats(projectId, mediaResult.data ?? [], mediaByObservation);
 
   return (obsResult.data ?? []).map((row) =>
     observationRowToObservation(
@@ -110,6 +112,30 @@ export async function fetchObservationsForProject(
       mediaByObservation.get(row.id) ?? { photoIds: [], audioIds: [] },
     ),
   );
+}
+
+function logProjectMediaLoadStats(
+  projectId: string,
+  mediaRows: { id: string; observation_id: string; type: string }[],
+  mediaByObservation: ReturnType<typeof groupMediaIdsByObservation>,
+): void {
+  const photoCount = mediaRows.filter((row) => row.type === "photo").length;
+  const audioCount = mediaRows.filter((row) => row.type === "audio").length;
+
+  logMedia("load:project_media", {
+    projectId,
+    totalMediaItems: mediaRows.length,
+    photoCount,
+    audioCount,
+    observationCount: mediaByObservation.size,
+    perObservation: Array.from(mediaByObservation.entries()).map(
+      ([observationId, ids]) => ({
+        observationId,
+        photoIds: ids.photoIds.length,
+        audioIds: ids.audioIds.length,
+      }),
+    ),
+  });
 }
 
 export async function fetchAllObservations(client: Client): Promise<Observation[]> {
@@ -122,6 +148,16 @@ export async function fetchAllObservations(client: Client): Promise<Observation[
   if (mediaResult.error) throw mediaResult.error;
 
   const mediaByObservation = groupMediaIdsByObservation(mediaResult.data ?? []);
+
+  const photoCount = (mediaResult.data ?? []).filter((row) => row.type === "photo").length;
+  const audioCount = (mediaResult.data ?? []).filter((row) => row.type === "audio").length;
+
+  logMedia("load:all_media", {
+    totalMediaItems: mediaResult.data?.length ?? 0,
+    photoCount,
+    audioCount,
+    observationCount: mediaByObservation.size,
+  });
 
   return (obsResult.data ?? []).map((row) =>
     observationRowToObservation(

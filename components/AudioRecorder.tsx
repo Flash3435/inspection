@@ -1,27 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { logMedia } from "@/lib/media-diagnostics";
+import {
+  extensionForAudioMime,
+  getSupportedRecorderMimeType,
+} from "@/lib/media-utils";
 import { formatDateTime } from "@/lib/utils";
 
 interface AudioRecorderProps {
-  onSave: (blob: Blob, filename: string) => void;
+  onSave: (blob: Blob, filename: string, mimeType: string) => void;
   disabled?: boolean;
 }
 
 type RecorderState = "idle" | "recording" | "preview";
-
-function getSupportedMimeType(): string | null {
-  if (typeof MediaRecorder === "undefined") return null;
-
-  const candidates = [
-    "audio/webm;codecs=opus",
-    "audio/webm",
-    "audio/mp4",
-    "audio/ogg;codecs=opus",
-  ];
-
-  return candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? null;
-}
 
 function formatDuration(seconds: number): string {
   const mins = Math.floor(seconds / 60);
@@ -29,8 +21,14 @@ function formatDuration(seconds: number): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
+function timestampSlug(): string {
+  return new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+}
+
 export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
-  const mimeType = getSupportedMimeType();
+  const [mimeType, setMimeType] = useState<string | null>(() =>
+    getSupportedRecorderMimeType(),
+  );
   const isSupported =
     typeof navigator !== "undefined" &&
     !!navigator.mediaDevices?.getUserMedia &&
@@ -47,6 +45,7 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<number | null>(null);
+  const activeMimeTypeRef = useRef<string | null>(mimeType);
 
   function stopStream() {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -83,16 +82,26 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
   }, [previewUrl]);
 
   async function startRecording() {
-    if (!isSupported || !mimeType) return;
+    const selectedMime = getSupportedRecorderMimeType();
+    if (!selectedMime) {
+      setError(
+        "In-browser recording is not supported in this browser. Use the upload option below instead.",
+      );
+      return;
+    }
 
+    setMimeType(selectedMime);
+    activeMimeTypeRef.current = selectedMime;
     setError(null);
     clearPreview();
+
+    logMedia("recorder:start", { mimeType: selectedMime });
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
-      const recorder = new MediaRecorder(stream, { mimeType });
+      const recorder = new MediaRecorder(stream, { mimeType: selectedMime });
       mediaRecorderRef.current = recorder;
       chunksRef.current = [];
 
@@ -101,7 +110,15 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
       };
 
       recorder.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: mimeType });
+        const recordedMime = activeMimeTypeRef.current ?? selectedMime;
+        const blob = new Blob(chunksRef.current, {
+          type: recordedMime || "audio/webm",
+        });
+        logMedia("recorder:stopped", {
+          mimeType: blob.type || recordedMime,
+          size: blob.size,
+          chunkCount: chunksRef.current.length,
+        });
         const url = URL.createObjectURL(blob);
         setPreviewBlob(blob);
         setPreviewUrl(url);
@@ -138,14 +155,22 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
     if (!previewBlob) return;
 
     setIsSaving(true);
-    const extension = mimeType?.includes("mp4")
-      ? "m4a"
-      : mimeType?.includes("ogg")
-        ? "ogg"
-        : "webm";
-    const filename = `recording-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.${extension}`;
+    const resolvedMime = previewBlob.type || mimeType || "audio/webm";
+    const extension = extensionForAudioMime(resolvedMime);
+    const filename = `recording-${timestampSlug()}.${extension}`;
 
-    onSave(previewBlob, filename);
+    logMedia("recorder:save", {
+      filename,
+      mimeType: resolvedMime,
+      size: previewBlob.size,
+    });
+
+    const normalizedBlob =
+      previewBlob.type === resolvedMime
+        ? previewBlob
+        : new Blob([previewBlob], { type: resolvedMime });
+
+    onSave(normalizedBlob, filename, resolvedMime);
     resetToIdle();
     setIsSaving(false);
   }
@@ -194,6 +219,7 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
           <p className="text-xs font-medium text-slate-500">
             Preview — {formatDuration(duration)} recorded{" "}
             {formatDateTime(new Date().toISOString())}
+            {previewBlob?.type ? ` · ${previewBlob.type}` : ""}
           </p>
           <audio controls src={previewUrl} className="w-full" />
           <div className="flex flex-wrap gap-2">

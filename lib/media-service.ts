@@ -1,6 +1,17 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 import {
+  logMedia,
+  logMediaError,
+  mapUploadErrorToUserMessage,
+  MediaUploadError,
+  userMessageForStep,
+} from "@/lib/media-diagnostics";
+import {
+  prepareAudioUpload,
+  preparePhotoUpload,
+} from "@/lib/media-utils";
+import {
   deleteMediaForObservation as deleteCloudMediaForObservation,
   deleteMediaForProject as deleteCloudMediaForProject,
   deleteMediaItem as deleteCloudMediaItem,
@@ -26,6 +37,7 @@ import {
 
 export type { MediaSaveInput };
 export type MediaType = "photo" | "audio";
+export { MediaUploadError, mapUploadErrorToUserMessage };
 
 export interface ResolvedMediaRecord {
   id: string;
@@ -55,12 +67,89 @@ export async function saveMediaItem(
   const { userId, client, id } = options;
   const cloud = getCloudContext(userId, client);
 
-  if (cloud) {
-    const saved = await uploadMediaItem(cloud.client, cloud.userId, input, id);
-    return { id: saved.id };
+  logMedia("save:start", {
+    mediaType: input.type,
+    hasSession: Boolean(userId && client),
+    userId: userId ?? null,
+    filename: input.filename,
+    mimeType: input.file.type || "(empty)",
+    size: input.file.size,
+    observationId: input.observationId,
+    projectId: input.projectId,
+  });
+
+  let prepared;
+  try {
+    prepared =
+      input.type === "photo"
+        ? preparePhotoUpload(input.file, input.filename)
+        : prepareAudioUpload(input.file, input.filename);
+  } catch (err) {
+    logMediaError("save:prepare_failed", { mediaType: input.type }, err);
+    if (err instanceof MediaUploadError) throw err;
+    throw new MediaUploadError(
+      "validate",
+      input.type,
+      mapUploadErrorToUserMessage(err, input.type),
+      err,
+    );
   }
 
-  const saved = await saveLocalMediaItem(input, id);
+  logMedia("save:prepared", {
+    mediaType: input.type,
+    filename: prepared.filename,
+    mimeType: prepared.mimeType,
+    size: prepared.size,
+  });
+
+  const normalizedInput: MediaSaveInput = {
+    ...input,
+    file: prepared.blob,
+    filename: prepared.filename,
+    mimeType: prepared.mimeType,
+  };
+
+  if (cloud) {
+    try {
+      const saved = await uploadMediaItem(
+        cloud.client,
+        cloud.userId,
+        normalizedInput,
+        id,
+      );
+      logMedia("save:complete", {
+        mediaType: input.type,
+        mediaId: saved.id,
+        storagePath: saved.storagePath,
+      });
+      return { id: saved.id };
+    } catch (err) {
+      logMediaError("save:cloud_failed", { mediaType: input.type }, err);
+      if (err instanceof MediaUploadError) throw err;
+      throw new MediaUploadError(
+        "upload",
+        input.type,
+        mapUploadErrorToUserMessage(err, input.type),
+        err,
+      );
+    }
+  }
+
+  if (!userId) {
+    logMedia("save:local_fallback", { mediaType: input.type });
+  } else {
+    logMediaError("save:no_client", {
+      mediaType: input.type,
+      userId,
+    });
+    throw new MediaUploadError(
+      "auth",
+      input.type,
+      userMessageForStep("auth", input.type),
+    );
+  }
+
+  const saved = await saveLocalMediaItem(normalizedInput, id);
   return { id: saved.id };
 }
 
@@ -128,16 +217,24 @@ async function resolveCloudMedia(
   client: Client,
   item: CloudMediaItem,
 ): Promise<ResolvedMediaRecord> {
-  const url = await getSignedMediaUrl(client, item.storagePath);
-  return {
-    id: item.id,
-    type: item.type,
-    filename: item.filename,
-    mimeType: item.mimeType,
-    size: item.size,
-    createdAt: item.createdAt,
-    url,
-  };
+  try {
+    const url = await getSignedMediaUrl(client, item.storagePath);
+    return {
+      id: item.id,
+      type: item.type,
+      filename: item.filename,
+      mimeType: item.mimeType,
+      size: item.size,
+      createdAt: item.createdAt,
+      url,
+    };
+  } catch (err) {
+    logMediaError("resolve:signed_url_failed", {
+      mediaId: item.id,
+      storagePath: item.storagePath,
+    }, err);
+    throw err;
+  }
 }
 
 function resolveLocalMedia(item: StoredMediaItem): ResolvedMediaRecord {
@@ -162,12 +259,22 @@ export async function resolveMediaByIds(
   const { userId, client } = options;
   const cloud = getCloudContext(userId, client);
 
+  logMedia("resolve:start", {
+    count: ids.length,
+    hasSession: Boolean(cloud),
+  });
+
   if (cloud) {
     const items = await getCloudMediaItemsByIds(cloud.client, ids);
     const byId = new Map(items.map((item) => [item.id, item]));
     const ordered = ids
       .map((id) => byId.get(id))
       .filter((item): item is CloudMediaItem => item !== undefined);
+
+    logMedia("resolve:loaded", {
+      requested: ids.length,
+      found: ordered.length,
+    });
 
     return Promise.all(
       ordered.map((item) => resolveCloudMedia(cloud.client, item)),

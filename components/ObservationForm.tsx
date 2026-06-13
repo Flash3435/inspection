@@ -9,8 +9,10 @@ import { OBSERVATION_STATUSES, OBSERVATION_STATUS_LABELS, DISCIPLINES, DISCIPLIN
 import {
   deleteMediaForObservation,
   deleteMediaItem,
+  mapUploadErrorToUserMessage,
   saveMediaItem,
 } from "@/lib/media-service";
+import { logMedia } from "@/lib/media-diagnostics";
 import {
   generateObservationDraft,
   formatDraftSourceSummary,
@@ -62,6 +64,9 @@ export function ObservationForm({
     transcribeObservationAudio,
     updateObservationTranscript,
     clearObservationTranscript,
+    ensureDraftObservation,
+    deleteObservation,
+    isCloudMode,
   } = useInspection();
 
   const [form, setForm] = useState<ObservationInput>(() =>
@@ -112,6 +117,7 @@ export function ObservationForm({
   const [isUploadingAudio, setIsUploadingAudio] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [error, setError] = useState("");
+  const [draftReady, setDraftReady] = useState(isEditing || !isCloudMode);
 
   const storedObservation = getObservation(observationId);
   const transcripts =
@@ -123,12 +129,43 @@ export function ObservationForm({
   const { photos, audio, loading: mediaLoading } = useResolvedMedia(allMediaIds);
 
   useEffect(() => {
+    if (isEditing || !isCloudMode) {
+      setDraftReady(true);
+      return;
+    }
+
+    let cancelled = false;
+
+    void ensureDraftObservation(projectId, observationId)
+      .then(() => {
+        if (!cancelled) setDraftReady(true);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(
+            err instanceof Error
+              ? err.message
+              : "Failed to prepare observation for media upload.",
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isEditing, isCloudMode, projectId, observationId, ensureDraftObservation]);
+
+  useEffect(() => {
     return () => {
       if (!isEditing && !submittedRef.current) {
-        void deleteMediaForObservation(observationId, mediaOptions);
+        if (isCloudMode) {
+          void deleteObservation(observationId);
+        } else {
+          void deleteMediaForObservation(observationId, mediaOptions);
+        }
       }
     };
-  }, [isEditing, observationId, mediaOptions]);
+  }, [isEditing, observationId, mediaOptions, isCloudMode, deleteObservation]);
 
   function handleChange(
     e: React.ChangeEvent<
@@ -152,9 +189,18 @@ export function ObservationForm({
     }));
   }
 
+  function mediaUploadErrorMessage(err: unknown, mediaType: "photo" | "audio") {
+    return mapUploadErrorToUserMessage(err, mediaType);
+  }
+
   async function handlePhotoChange(e: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files ?? []);
     if (files.length === 0) return;
+    if (!draftReady) {
+      setError("Preparing observation for upload. Please wait a moment and retry.");
+      e.target.value = "";
+      return;
+    }
 
     setIsUploadingPhoto(true);
     setError("");
@@ -162,6 +208,11 @@ export function ObservationForm({
     try {
       const newIds: string[] = [];
       for (const file of files) {
+        logMedia("form:photo_selected", {
+          name: file.name || "(empty)",
+          mimeType: file.type || "(empty)",
+          size: file.size,
+        });
         const saved = await saveMediaItem(
           {
             observationId,
@@ -178,8 +229,8 @@ export function ObservationForm({
         ...prev,
         photoIds: [...prev.photoIds, ...newIds],
       }));
-    } catch {
-      setError("Failed to save photo. Please try again.");
+    } catch (err) {
+      setError(mediaUploadErrorMessage(err, "photo"));
     } finally {
       setIsUploadingPhoto(false);
       e.target.value = "";
@@ -189,6 +240,11 @@ export function ObservationForm({
   async function handleAudioUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files ?? []);
     if (files.length === 0) return;
+    if (!draftReady) {
+      setError("Preparing observation for upload. Please wait a moment and retry.");
+      e.target.value = "";
+      return;
+    }
 
     setIsUploadingAudio(true);
     setError("");
@@ -196,6 +252,11 @@ export function ObservationForm({
     try {
       const newIds: string[] = [];
       for (const file of files) {
+        logMedia("form:audio_selected", {
+          name: file.name || "(empty)",
+          mimeType: file.type || "(empty)",
+          size: file.size,
+        });
         const saved = await saveMediaItem(
           {
             observationId,
@@ -212,16 +273,27 @@ export function ObservationForm({
         ...prev,
         audioIds: [...prev.audioIds, ...newIds],
       }));
-    } catch {
-      setError("Failed to save audio file. Please try again.");
+    } catch (err) {
+      setError(mediaUploadErrorMessage(err, "audio"));
     } finally {
       setIsUploadingAudio(false);
       e.target.value = "";
     }
   }
 
-  async function handleRecordingSave(blob: Blob, filename: string) {
+  async function handleRecordingSave(blob: Blob, filename: string, mimeType: string) {
+    if (!draftReady) {
+      setError("Preparing observation for upload. Please wait a moment and retry.");
+      return;
+    }
+
     setError("");
+    logMedia("form:recording_save", {
+      filename,
+      mimeType,
+      size: blob.size,
+    });
+
     try {
       const saved = await saveMediaItem(
         {
@@ -237,8 +309,8 @@ export function ObservationForm({
         ...prev,
         audioIds: [...prev.audioIds, saved.id],
       }));
-    } catch {
-      setError("Failed to save recording. Please try again.");
+    } catch (err) {
+      setError(mediaUploadErrorMessage(err, "audio"));
     }
   }
 
@@ -516,7 +588,11 @@ export function ObservationForm({
 
   async function handleCancel() {
     if (!isEditing) {
-      await deleteMediaForObservation(observationId, mediaOptions);
+      if (isCloudMode) {
+        await deleteObservation(observationId);
+      } else {
+        await deleteMediaForObservation(observationId, mediaOptions);
+      }
     }
     onCancel();
   }
@@ -701,14 +777,19 @@ export function ObservationForm({
             <div className="mt-1 rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4">
               <input
                 type="file"
-                accept="image/*"
+                accept="image/jpeg,image/png,image/heic,image/heif,image/webp,image/*"
                 multiple
-                disabled={isUploadingPhoto}
+                disabled={isUploadingPhoto || !draftReady}
                 onChange={handlePhotoChange}
                 className="block w-full text-xs text-slate-500 file:mr-3 file:rounded-md file:border-0 file:bg-slate-200 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700 disabled:opacity-50"
               />
               {isUploadingPhoto && (
                 <p className="mt-2 text-xs text-slate-500">Saving photos…</p>
+              )}
+              {!draftReady && isCloudMode && (
+                <p className="mt-2 text-xs text-slate-500">
+                  Preparing observation for media upload…
+                </p>
               )}
               <div className="mt-3">
                 <MediaPreviewList
@@ -740,9 +821,9 @@ export function ObservationForm({
             <div className="mt-1 rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4">
               <input
                 type="file"
-                accept="audio/*"
+                accept="audio/webm,audio/mp4,audio/mpeg,audio/ogg,audio/*"
                 multiple
-                disabled={isUploadingAudio}
+                disabled={isUploadingAudio || !draftReady}
                 onChange={handleAudioUpload}
                 className="block w-full text-xs text-slate-500 file:mr-3 file:rounded-md file:border-0 file:bg-slate-200 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700 disabled:opacity-50"
               />

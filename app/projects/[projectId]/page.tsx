@@ -25,7 +25,6 @@ export default function ProjectDetailPage() {
     hydrated,
     getProject,
     getObservationsForProject,
-    createObservation,
     updateObservation,
     deleteObservation,
     deleteProject,
@@ -70,7 +69,7 @@ export default function ProjectDetailPage() {
   const editingObservation = observations.find((o) => o.id === editingId);
 
   function handleCreate(input: ObservationInput, observationId: string) {
-    void createObservation(projectId, input, observationId).then(() => {
+    void updateObservation(observationId, input).then(() => {
       setViewMode("list");
     });
   }

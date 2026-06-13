@@ -1,6 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "./database.types";
 import type { MediaType } from "@/lib/types";
+import {
+  logMedia,
+  logMediaError,
+  MediaUploadError,
+  userMessageForStep,
+} from "@/lib/media-diagnostics";
 
 const BUCKET = "inspection-media";
 const SIGNED_URL_TTL_SECONDS = 3600;
@@ -25,6 +31,7 @@ export interface MediaSaveInput {
   type: MediaType;
   file: Blob;
   filename: string;
+  mimeType?: string;
 }
 
 function buildStoragePath(
@@ -38,6 +45,14 @@ function buildStoragePath(
   return `${userId}/${projectId}/${observationId}/${mediaId}/${safeName}`;
 }
 
+function formatStorageError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "object" && err !== null && "message" in err) {
+    return String((err as { message: unknown }).message);
+  }
+  return String(err);
+}
+
 export async function uploadMediaItem(
   client: Client,
   userId: string,
@@ -45,6 +60,8 @@ export async function uploadMediaItem(
   id?: string,
 ): Promise<CloudMediaItem> {
   const mediaId = id ?? crypto.randomUUID();
+  const contentType =
+    input.mimeType ?? (input.file.type || "application/octet-stream");
   const storagePath = buildStoragePath(
     userId,
     input.projectId,
@@ -53,14 +70,45 @@ export async function uploadMediaItem(
     input.filename,
   );
 
+  logMedia("upload:start", {
+    mediaType: input.type,
+    mediaId,
+    filename: input.filename,
+    mimeType: contentType,
+    size: input.file.size,
+    storagePath,
+    observationId: input.observationId,
+    projectId: input.projectId,
+    userId,
+  });
+
   const { error: uploadError } = await client.storage
     .from(BUCKET)
     .upload(storagePath, input.file, {
-      contentType: input.file.type || "application/octet-stream",
+      contentType,
       upsert: false,
     });
 
-  if (uploadError) throw uploadError;
+  if (uploadError) {
+    logMediaError("upload:storage_failed", {
+      mediaType: input.type,
+      mediaId,
+      storagePath,
+      mimeType: contentType,
+    }, uploadError);
+    throw new MediaUploadError(
+      "upload",
+      input.type,
+      userMessageForStep("upload", input.type),
+      uploadError,
+    );
+  }
+
+  logMedia("upload:storage_ok", {
+    mediaType: input.type,
+    mediaId,
+    storagePath,
+  });
 
   const { data, error } = await client
     .from("media_items")
@@ -72,16 +120,41 @@ export async function uploadMediaItem(
       type: input.type,
       storage_path: storagePath,
       filename: input.filename,
-      mime_type: input.file.type || "application/octet-stream",
+      mime_type: contentType,
       size: input.file.size,
     })
     .select("*")
     .single();
 
   if (error) {
-    await client.storage.from(BUCKET).remove([storagePath]);
-    throw error;
+    logMediaError("upload:db_insert_failed", {
+      mediaType: input.type,
+      mediaId,
+      storagePath,
+    }, error);
+
+    const { error: cleanupError } = await client.storage
+      .from(BUCKET)
+      .remove([storagePath]);
+
+    if (cleanupError) {
+      logMediaError("upload:cleanup_failed", { storagePath }, cleanupError);
+    } else {
+      logMedia("upload:cleanup_ok", { storagePath });
+    }
+
+    const message = formatStorageError(error).toLowerCase().includes("foreign key")
+      ? userMessageForStep("attach", input.type)
+      : userMessageForStep("db_insert", input.type);
+
+    throw new MediaUploadError("db_insert", input.type, message, error);
   }
+
+  logMedia("upload:db_insert_ok", {
+    mediaType: input.type,
+    mediaId,
+    storagePath,
+  });
 
   return {
     id: data.id,
@@ -131,14 +204,23 @@ export async function getSignedMediaUrl(
   client: Client,
   storagePath: string,
 ): Promise<string> {
+  logMedia("signed_url:start", { storagePath });
+
   const { data, error } = await client.storage
     .from(BUCKET)
     .createSignedUrl(storagePath, SIGNED_URL_TTL_SECONDS);
 
   if (error || !data?.signedUrl) {
-    throw error ?? new Error("Failed to create signed URL");
+    logMediaError("signed_url:failed", { storagePath }, error);
+    throw new MediaUploadError(
+      "signed_url",
+      "photo",
+      userMessageForStep("signed_url", "photo"),
+      error,
+    );
   }
 
+  logMedia("signed_url:ok", { storagePath });
   return data.signedUrl;
 }
 
@@ -252,3 +334,32 @@ export async function getMediaItem(
   const items = await getMediaItemsByIds(client, [mediaId]);
   return items[0] ?? null;
 }
+
+export async function listRecentMediaForUser(
+  client: Client,
+  userId: string,
+  limit = 20,
+): Promise<CloudMediaItem[]> {
+  const { data, error } = await client
+    .from("media_items")
+    .select("*")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) throw error;
+
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    observationId: row.observation_id,
+    projectId: row.project_id,
+    type: row.type as MediaType,
+    filename: row.filename,
+    mimeType: row.mime_type,
+    size: row.size,
+    createdAt: row.created_at,
+    storagePath: row.storage_path,
+  }));
+}
+
+export { BUCKET as MEDIA_BUCKET };
