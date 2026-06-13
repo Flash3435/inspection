@@ -68,7 +68,11 @@ async function verifyUploadedAudioBlob(
   originalBlob: Blob,
 ): Promise<void> {
   try {
-    const downloaded = await downloadMediaBlob(client, saved.storagePath);
+    const downloaded = await withTimeout(
+      downloadMediaBlob(client, saved.storagePath),
+      12000,
+      "verify download",
+    );
     const sizeMatch = originalBlob.size === downloaded.size;
     logAudio("save:verify", {
       mediaId: saved.id,
@@ -91,6 +95,36 @@ async function verifyUploadedAudioBlob(
       storagePath: saved.storagePath,
     }, err);
   }
+}
+
+function scheduleUploadedAudioVerification(
+  client: Client,
+  saved: CloudMediaItem,
+  originalBlob: Blob,
+): void {
+  void verifyUploadedAudioBlob(client, saved, originalBlob);
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
 }
 
 export async function saveMediaItem(
@@ -182,7 +216,7 @@ export async function saveMediaItem(
           uploadedSize: saved.size,
           storagePath: saved.storagePath,
         });
-        await verifyUploadedAudioBlob(
+        scheduleUploadedAudioVerification(
           cloud.client,
           saved,
           prepared.blob,
@@ -284,8 +318,22 @@ async function resolveCloudMedia(
   client: Client,
   item: CloudMediaItem,
 ): Promise<ResolvedMediaRecord> {
+  const baseRecord: ResolvedMediaRecord = {
+    id: item.id,
+    type: item.type,
+    filename: item.filename,
+    mimeType: item.mimeType,
+    size: item.size,
+    createdAt: item.createdAt,
+    url: "",
+  };
+
   try {
-    const url = await getSignedMediaUrl(client, item.storagePath);
+    const url = await withTimeout(
+      getSignedMediaUrl(client, item.storagePath),
+      12000,
+      "signed URL",
+    );
     if (item.type === "audio") {
       logAudio("resolve:signed_url", {
         mediaId: item.id,
@@ -295,15 +343,7 @@ async function resolveCloudMedia(
         urlPrefix: url.slice(0, 48),
       });
     }
-    return {
-      id: item.id,
-      type: item.type,
-      filename: item.filename,
-      mimeType: item.mimeType,
-      size: item.size,
-      createdAt: item.createdAt,
-      url,
-    };
+    return { ...baseRecord, url };
   } catch (err) {
     if (item.type === "audio") {
       logAudioError("resolve:signed_url_failed", {
@@ -315,7 +355,7 @@ async function resolveCloudMedia(
       mediaId: item.id,
       storagePath: item.storagePath,
     }, err);
-    throw err;
+    return baseRecord;
   }
 }
 
@@ -358,9 +398,16 @@ export async function resolveMediaByIds(
       found: ordered.length,
     });
 
-    return Promise.all(
+    const resolved = await Promise.all(
       ordered.map((item) => resolveCloudMedia(cloud.client, item)),
     );
+
+    logMedia("resolve:complete", {
+      count: resolved.length,
+      withUrl: resolved.filter((item) => item.url).length,
+    });
+
+    return resolved;
   }
 
   const items = await getLocalMediaItemsByIds(ids);

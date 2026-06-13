@@ -34,6 +34,7 @@ interface AudioNoteItemProps {
   compact?: boolean;
   savedLocally?: boolean;
   useLocalPlayback?: boolean;
+  urlPending?: boolean;
   onTranscribe?: () => void | Promise<void>;
   onUpdateTranscript?: (text: string) => void;
   onClearTranscript?: () => void;
@@ -47,6 +48,7 @@ export function AudioNoteItem({
   compact = false,
   savedLocally = false,
   useLocalPlayback = false,
+  urlPending = false,
   onTranscribe,
   onUpdateTranscript,
   onClearTranscript,
@@ -137,15 +139,24 @@ export function AudioNoteItem({
         </div>
       </div>
 
-      <AudioPlayback
-        key={`${item.id}:${item.url}:${useLocalPlayback}`}
-        url={item.url}
-        mimeType={item.mimeType}
-        filename={item.filename}
-        logContext="note"
-        saved={!useLocalPlayback}
-        useLocalPlayback={useLocalPlayback}
-      />
+      {(item.url || useLocalPlayback) && (
+        <AudioPlayback
+          key={`${item.id}:${item.url}:${useLocalPlayback}`}
+          url={item.url}
+          mimeType={item.mimeType}
+          filename={item.filename}
+          logContext="note"
+          saved={!useLocalPlayback}
+          useLocalPlayback={useLocalPlayback}
+        />
+      )}
+
+      {urlPending && !useLocalPlayback && (
+        <p className="mt-2 text-xs text-amber-700" role="status">
+          Saved, but audio preview could not be loaded. Try refreshing or use
+          Open audio file below.
+        </p>
+      )}
 
       {isFailed && !isTranscribing && (
         <p className="mt-2 text-xs text-red-600" role="alert">

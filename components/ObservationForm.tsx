@@ -12,7 +12,7 @@ import {
   mapUploadErrorToUserMessage,
   saveMediaItem,
 } from "@/lib/media-service";
-import { logMedia, logTranscribe, logTranscribeError } from "@/lib/media-diagnostics";
+import { logMedia, logTranscribe, logTranscribeError, logAudio, logAudioError } from "@/lib/media-diagnostics";
 import {
   generateObservationDraft,
   formatDraftSourceSummary,
@@ -119,7 +119,7 @@ export function ObservationForm({
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
   const [isUploadingAudio, setIsUploadingAudio] = useState(false);
   const [localAudioPlayback, setLocalAudioPlayback] = useState<
-    Record<string, { url: string; mimeType: string; filename: string }>
+    Record<string, { url: string; mimeType: string; filename: string; size: number; createdAt: string }>
   >({});
   const [savedAudioIds, setSavedAudioIds] = useState<Set<string>>(new Set());
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -137,7 +137,8 @@ export function ObservationForm({
   );
 
   const allMediaIds = [...form.photoIds, ...form.audioIds];
-  const { photos, audio, loading: mediaLoading } = useResolvedMedia(allMediaIds);
+  const { photos, audio, loading: mediaLoading, error: mediaResolveError } =
+    useResolvedMedia(allMediaIds);
 
   useEffect(() => {
     if (isEditing || !isCloudMode) return;
@@ -177,6 +178,11 @@ export function ObservationForm({
 
   useEffect(() => {
     if (!storedObservation) return;
+    logMedia("form:patch_media_ids", {
+      observationId,
+      photoCount: form.photoIds.length,
+      audioCount: form.audioIds.length,
+    });
     patchObservationMediaIds(observationId, form.photoIds, form.audioIds);
   }, [
     observationId,
@@ -201,15 +207,22 @@ export function ObservationForm({
     mimeType: string,
   ) {
     const url = URL.createObjectURL(blob);
+    const createdAt = new Date().toISOString();
     setLocalAudioPlayback((prev) => {
       const existing = prev[mediaId];
       if (existing) URL.revokeObjectURL(existing.url);
       return {
         ...prev,
-        [mediaId]: { url, mimeType, filename },
+        [mediaId]: { url, mimeType, filename, size: blob.size, createdAt },
       };
     });
     setSavedAudioIds((prev) => new Set(prev).add(mediaId));
+    logAudio("form:local_override_set", {
+      mediaId,
+      filename,
+      mimeType,
+      size: blob.size,
+    });
   }
 
   function clearLocalAudioPlayback(mediaId: string) {
@@ -354,6 +367,13 @@ export function ObservationForm({
     }
 
     setError("");
+    setIsUploadingAudio(true);
+    logAudio("form:recording_save_click", {
+      filename,
+      mimeType,
+      size: blob.size,
+      observationId,
+    });
     logMedia("form:recording_save", {
       filename,
       mimeType,
@@ -371,13 +391,22 @@ export function ObservationForm({
         },
         mediaOptions,
       );
+      logAudio("form:recording_save_success", { mediaId: saved.id, filename });
       cacheLocalAudioPlayback(saved.id, blob, filename, mimeType);
       setForm((prev) => ({
         ...prev,
         audioIds: [...prev.audioIds, saved.id],
       }));
+      logMedia("form:recording_audio_ids_updated", {
+        mediaId: saved.id,
+        audioCount: form.audioIds.length + 1,
+      });
     } catch (err) {
+      logAudioError("form:recording_save_failed", { filename }, err);
       setError(mediaUploadErrorMessage(err, "audio"));
+    } finally {
+      setIsUploadingAudio(false);
+      logMedia("form:recording_save_complete", { loadingCleared: true });
     }
   }
 
@@ -969,7 +998,8 @@ export function ObservationForm({
                 <MediaPreviewList
                   photos={[]}
                   audio={audio}
-                  loading={mediaLoading && form.audioIds.length > 0}
+                  loading={mediaLoading && audio.length === 0}
+                  resolveError={mediaResolveError}
                   transcripts={transcripts}
                   localAudioPlayback={localAudioPlayback}
                   savedAudioIds={savedAudioIds}

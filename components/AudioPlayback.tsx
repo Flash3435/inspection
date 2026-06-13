@@ -90,6 +90,17 @@ export function AudioPlayback({
       )
     : null;
 
+  if (!url) {
+    return (
+      <div className="mt-2 space-y-1">
+        <p className="text-xs text-amber-700" role="status">
+          {unsupportedMessage}
+        </p>
+        {downloadLink}
+      </div>
+    );
+  }
+
   if (showUnsupported) {
     return (
       <div className="mt-2 space-y-1">
