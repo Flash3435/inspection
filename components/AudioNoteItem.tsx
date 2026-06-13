@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { AudioPlayback } from "@/components/AudioPlayback";
 import type { ResolvedMediaItem } from "@/hooks/useResolvedMedia";
 import type { AudioTranscript } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
@@ -88,7 +89,13 @@ export function AudioNoteItem({
         </div>
       </div>
 
-      <audio controls src={item.url} className="mt-2 h-8 w-full" />
+      <AudioPlayback
+        key={`${item.id}:${item.url}`}
+        url={item.url}
+        mimeType={item.mimeType}
+        filename={item.filename}
+        logContext="note"
+      />
 
       {(isCompleted || isFailed || isTranscribing) && (
         <div className="mt-3 border-t border-slate-100 pt-3">

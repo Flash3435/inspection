@@ -3,6 +3,8 @@ import type { Database } from "@/lib/supabase/database.types";
 import {
   logMedia,
   logMediaError,
+  logAudio,
+  logAudioError,
   mapUploadErrorToUserMessage,
   MediaUploadError,
   userMessageForStep,
@@ -78,6 +80,15 @@ export async function saveMediaItem(
     projectId: input.projectId,
   });
 
+  if (input.type === "audio") {
+    logAudio("save:start", {
+      filename: input.filename,
+      blobMimeType: input.file.type || "(empty)",
+      size: input.file.size,
+      observationId: input.observationId,
+    });
+  }
+
   let prepared;
   try {
     prepared =
@@ -101,6 +112,14 @@ export async function saveMediaItem(
     mimeType: prepared.mimeType,
     size: prepared.size,
   });
+
+  if (input.type === "audio") {
+    logAudio("save:prepared", {
+      filename: prepared.filename,
+      mimeType: prepared.mimeType,
+      size: prepared.size,
+    });
+  }
 
   const normalizedInput: MediaSaveInput = {
     ...input,
@@ -219,6 +238,15 @@ async function resolveCloudMedia(
 ): Promise<ResolvedMediaRecord> {
   try {
     const url = await getSignedMediaUrl(client, item.storagePath);
+    if (item.type === "audio") {
+      logAudio("resolve:signed_url", {
+        mediaId: item.id,
+        filename: item.filename,
+        mimeType: item.mimeType,
+        storagePath: item.storagePath,
+        urlPrefix: url.slice(0, 48),
+      });
+    }
     return {
       id: item.id,
       type: item.type,
@@ -229,6 +257,12 @@ async function resolveCloudMedia(
       url,
     };
   } catch (err) {
+    if (item.type === "audio") {
+      logAudioError("resolve:signed_url_failed", {
+        mediaId: item.id,
+        storagePath: item.storagePath,
+      }, err);
+    }
     logMediaError("resolve:signed_url_failed", {
       mediaId: item.id,
       storagePath: item.storagePath,
@@ -316,10 +350,25 @@ export async function getAudioMediaForTranscription(
   const { userId, client } = options;
   const cloud = getCloudContext(userId, client);
 
+  logAudio("transcribe:fetch_start", {
+    mediaId,
+    hasSession: Boolean(cloud),
+  });
+
   if (cloud) {
     const item = await getCloudMediaItem(cloud.client, mediaId);
-    if (!item || item.type !== "audio") return null;
+    if (!item || item.type !== "audio") {
+      logAudio("transcribe:fetch_missing", { mediaId });
+      return null;
+    }
     const blob = await downloadMediaBlob(cloud.client, item.storagePath);
+    logAudio("transcribe:fetch_success", {
+      mediaId,
+      filename: item.filename,
+      mimeType: item.mimeType,
+      size: blob.size,
+      blobType: blob.type || "(empty)",
+    });
     return {
       blob,
       filename: item.filename,
@@ -329,7 +378,18 @@ export async function getAudioMediaForTranscription(
   }
 
   const item = await getLocalMediaItem(mediaId);
-  if (!item || item.type !== "audio") return null;
+  if (!item || item.type !== "audio") {
+    logAudio("transcribe:fetch_missing", { mediaId });
+    return null;
+  }
+  logAudio("transcribe:fetch_success", {
+    mediaId,
+    filename: item.filename,
+    mimeType: item.mimeType,
+    size: item.blob.size,
+    blobType: item.blob.type || "(empty)",
+    source: "local",
+  });
   return {
     blob: item.blob,
     filename: item.filename,

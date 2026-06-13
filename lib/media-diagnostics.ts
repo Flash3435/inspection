@@ -29,6 +29,7 @@ export class MediaUploadError extends Error {
 }
 
 const LOG_PREFIX = "[media]";
+const AUDIO_LOG_PREFIX = "[audio]";
 
 function safeErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -41,6 +42,23 @@ function safeErrorMessage(err: unknown): string {
 export function logMedia(step: string, details: Record<string, unknown>): void {
   if (typeof console === "undefined") return;
   console.info(LOG_PREFIX, step, details);
+}
+
+export function logAudio(step: string, details: Record<string, unknown>): void {
+  if (typeof console === "undefined") return;
+  console.info(AUDIO_LOG_PREFIX, step, details);
+}
+
+export function logAudioError(
+  step: string,
+  details: Record<string, unknown>,
+  err?: unknown,
+): void {
+  if (typeof console === "undefined") return;
+  console.error(AUDIO_LOG_PREFIX, step, {
+    ...details,
+    error: err ? safeErrorMessage(err) : undefined,
+  });
 }
 
 export function logMediaError(

@@ -49,7 +49,8 @@ export function extensionForPhotoMime(mimeType: string): string {
 
 export function extensionForAudioMime(mimeType: string): string {
   const base = baseMimeType(mimeType);
-  return AUDIO_MIME_TO_EXT[base] ?? AUDIO_MIME_TO_EXT[mimeType] ?? "webm";
+  if (!base || base === "application/octet-stream") return "audio";
+  return AUDIO_MIME_TO_EXT[base] ?? AUDIO_MIME_TO_EXT[mimeType] ?? "audio";
 }
 
 export function resolvePhotoMimeType(
@@ -84,7 +85,21 @@ export function resolveAudioMimeType(
   if (ext === "ogg") return "audio/ogg";
   if (ext === "wav") return "audio/wav";
   if (ext === "aac") return "audio/aac";
-  return "audio/webm";
+  if (ext === "webm") return "audio/webm";
+  return "application/octet-stream";
+}
+
+export function resolveRecordedMime(
+  blob: Blob,
+  recorderMime: string | null,
+  filename?: string,
+): string {
+  const raw = normalizeMimeType(blob.type);
+  if (raw && raw !== "application/octet-stream") {
+    return raw.includes(";") ? raw : baseMimeType(raw);
+  }
+  if (recorderMime) return baseMimeType(recorderMime);
+  return resolveAudioMimeType(blob, filename);
 }
 
 export function generatePhotoFilename(mimeType: string): string {
@@ -189,13 +204,75 @@ export function prepareAudioUpload(
 }
 
 export const RECORDER_MIME_CANDIDATES = [
+  "audio/mp4",
+  "audio/aac",
+  "audio/mpeg",
   "audio/webm;codecs=opus",
   "audio/webm",
-  "audio/mp4",
   "audio/ogg;codecs=opus",
   "audio/ogg",
-  "audio/mpeg",
 ] as const;
+
+export interface BrowserAudioContext {
+  userAgent: string;
+  isIos: boolean;
+  isSafari: boolean;
+}
+
+export function detectBrowserAudioContext(): BrowserAudioContext {
+  if (typeof navigator === "undefined") {
+    return { userAgent: "", isIos: false, isSafari: false };
+  }
+  const ua = navigator.userAgent;
+  const isIos =
+    /iPad|iPhone|iPod/.test(ua) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const isSafari =
+    /Safari/i.test(ua) && !/Chrome|CriOS|FxiOS|EdgiOS/i.test(ua);
+  return { userAgent: ua, isIos, isSafari };
+}
+
+export function canPlayAudioMime(mimeType: string): boolean {
+  if (typeof document === "undefined") return true;
+  const base = baseMimeType(mimeType);
+  if (!base) return true;
+  const audio = document.createElement("audio");
+  const result = audio.canPlayType(mimeType) || audio.canPlayType(base);
+  return result === "probably" || result === "maybe";
+}
+
+export function isLikelyUnsupportedPlayback(
+  mimeType: string,
+  filename: string,
+): boolean {
+  const base = baseMimeType(mimeType);
+  const ext = extensionFromFilename(filename);
+  const candidates = [
+    mimeType,
+    base,
+    ext === "webm" ? "audio/webm" : null,
+    ext === "m4a" || ext === "mp4" ? "audio/mp4" : null,
+    ext === "mp3" ? "audio/mpeg" : null,
+    ext === "ogg" ? "audio/ogg" : null,
+    ext === "aac" ? "audio/aac" : null,
+  ].filter((value): value is string => Boolean(value));
+
+  return candidates.every((candidate) => !canPlayAudioMime(candidate));
+}
+
+export function getRecorderMimeSupport(): Record<string, boolean> {
+  if (typeof MediaRecorder === "undefined") {
+    return Object.fromEntries(
+      RECORDER_MIME_CANDIDATES.map((type) => [type, false]),
+    );
+  }
+  return Object.fromEntries(
+    RECORDER_MIME_CANDIDATES.map((type) => [
+      type,
+      MediaRecorder.isTypeSupported(type),
+    ]),
+  );
+}
 
 export function getSupportedRecorderMimeType(): string | null {
   if (typeof MediaRecorder === "undefined") return null;

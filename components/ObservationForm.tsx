@@ -821,7 +821,7 @@ export function ObservationForm({
             <div className="mt-1 rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4">
               <input
                 type="file"
-                accept="audio/webm,audio/mp4,audio/mpeg,audio/ogg,audio/*"
+                accept="audio/mp4,audio/aac,audio/mpeg,audio/webm,audio/ogg,audio/*"
                 multiple
                 disabled={isUploadingAudio || !draftReady}
                 onChange={handleAudioUpload}

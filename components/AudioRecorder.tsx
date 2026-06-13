@@ -1,12 +1,16 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { logMedia } from "@/lib/media-diagnostics";
+import { logAudio, logAudioError } from "@/lib/media-diagnostics";
 import {
+  detectBrowserAudioContext,
   extensionForAudioMime,
+  getRecorderMimeSupport,
   getSupportedRecorderMimeType,
+  resolveRecordedMime,
 } from "@/lib/media-utils";
 import { formatDateTime } from "@/lib/utils";
+import { AudioPlayback } from "@/components/AudioPlayback";
 
 interface AudioRecorderProps {
   onSave: (blob: Blob, filename: string, mimeType: string) => void;
@@ -37,6 +41,8 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
   const [state, setState] = useState<RecorderState>("idle");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
+  const [previewFilename, setPreviewFilename] = useState<string>("");
+  const [previewMime, setPreviewMime] = useState<string>("");
   const [duration, setDuration] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -56,6 +62,8 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(null);
     setPreviewBlob(null);
+    setPreviewFilename("");
+    setPreviewMime("");
     setDuration(0);
   }
 
@@ -71,6 +79,16 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
     setState("idle");
     setError(null);
   }
+
+  useEffect(() => {
+    const browser = detectBrowserAudioContext();
+    const selectedMime = getSupportedRecorderMimeType();
+    logAudio("recorder:init", {
+      ...browser,
+      selectedMimeType: selectedMime,
+      mimeSupport: getRecorderMimeSupport(),
+    });
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -95,7 +113,10 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
     setError(null);
     clearPreview();
 
-    logMedia("recorder:start", { mimeType: selectedMime });
+    logAudio("recorder:start", {
+      mimeType: selectedMime,
+      browser: detectBrowserAudioContext(),
+    });
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -112,15 +133,30 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
       recorder.onstop = () => {
         const recordedMime = activeMimeTypeRef.current ?? selectedMime;
         const blob = new Blob(chunksRef.current, {
-          type: recordedMime || "audio/webm",
+          type: recordedMime || "",
         });
-        logMedia("recorder:stopped", {
-          mimeType: blob.type || recordedMime,
+        const resolvedMime = resolveRecordedMime(blob, recordedMime);
+        const extension = extensionForAudioMime(resolvedMime);
+        const filename = `recording-${timestampSlug()}.${extension}`;
+
+        logAudio("recorder:stopped", {
+          selectedMimeType: recordedMime,
+          blobMimeType: blob.type || "(empty)",
+          resolvedMimeType: resolvedMime,
+          filename,
           size: blob.size,
           chunkCount: chunksRef.current.length,
         });
-        const url = URL.createObjectURL(blob);
-        setPreviewBlob(blob);
+
+        const normalizedBlob =
+          blob.type === resolvedMime
+            ? blob
+            : new Blob([blob], { type: resolvedMime });
+
+        const url = URL.createObjectURL(normalizedBlob);
+        setPreviewBlob(normalizedBlob);
+        setPreviewMime(resolvedMime);
+        setPreviewFilename(filename);
         setPreviewUrl(url);
         setState("preview");
         stopStream();
@@ -136,7 +172,10 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
         setDuration((prev) => prev + 1);
       }, 1000);
       setState("recording");
-    } catch {
+    } catch (err) {
+      logAudioError("recorder:start_failed", {
+        mimeType: selectedMime,
+      }, err);
       stopStream();
       setError(
         "Microphone access was denied or is unavailable. Check browser permissions and try again.",
@@ -155,13 +194,19 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
     if (!previewBlob) return;
 
     setIsSaving(true);
-    const resolvedMime = previewBlob.type || mimeType || "audio/webm";
+    const resolvedMime = resolveRecordedMime(
+      previewBlob,
+      mimeType,
+      previewFilename,
+    );
     const extension = extensionForAudioMime(resolvedMime);
-    const filename = `recording-${timestampSlug()}.${extension}`;
+    const filename =
+      previewFilename || `recording-${timestampSlug()}.${extension}`;
 
-    logMedia("recorder:save", {
+    logAudio("recorder:save", {
       filename,
       mimeType: resolvedMime,
+      blobMimeType: previewBlob.type || "(empty)",
       size: previewBlob.size,
     });
 
@@ -219,9 +264,16 @@ export function AudioRecorder({ onSave, disabled }: AudioRecorderProps) {
           <p className="text-xs font-medium text-slate-500">
             Preview — {formatDuration(duration)} recorded{" "}
             {formatDateTime(new Date().toISOString())}
-            {previewBlob?.type ? ` · ${previewBlob.type}` : ""}
+            {previewMime ? ` · ${previewMime}` : ""}
           </p>
-          <audio controls src={previewUrl} className="w-full" />
+          <AudioPlayback
+            key={previewUrl}
+            url={previewUrl}
+            mimeType={previewMime}
+            filename={previewFilename}
+            className="w-full"
+            logContext="recorder:preview"
+          />
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
