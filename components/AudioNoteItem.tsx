@@ -8,6 +8,7 @@ import {
   formatAudioFormatLabel,
   isLikelyUnsupportedPlayback,
 } from "@/lib/media-utils";
+import { hasCompletedTranscript } from "@/lib/transcript-utils";
 import { formatDateTime } from "@/lib/utils";
 
 function formatFileSize(bytes: number): string {
@@ -23,13 +24,17 @@ const STATUS_LABELS: Record<AudioTranscript["status"], string> = {
   failed: "Failed",
 };
 
+const TRANSCRIBE_FAILED_MESSAGE =
+  "Could not transcribe this audio note. Please try again.";
+
 interface AudioNoteItemProps {
   item: ResolvedMediaItem;
   transcript?: AudioTranscript;
+  transcripts?: Record<string, AudioTranscript>;
   compact?: boolean;
   savedLocally?: boolean;
   useLocalPlayback?: boolean;
-  onTranscribe?: () => void;
+  onTranscribe?: () => void | Promise<void>;
   onUpdateTranscript?: (text: string) => void;
   onClearTranscript?: () => void;
   onRemove?: () => void;
@@ -38,6 +43,7 @@ interface AudioNoteItemProps {
 export function AudioNoteItem({
   item,
   transcript,
+  transcripts = {},
   compact = false,
   savedLocally = false,
   useLocalPlayback = false,
@@ -47,8 +53,10 @@ export function AudioNoteItem({
   onRemove,
 }: AudioNoteItemProps) {
   const [expanded, setExpanded] = useState(!compact);
-  const isTranscribing = transcript?.status === "transcribing";
-  const isCompleted = transcript?.status === "completed";
+  const [localTranscribing, setLocalTranscribing] = useState(false);
+  const isTranscribing =
+    transcript?.status === "transcribing" || localTranscribing;
+  const isCompleted = hasCompletedTranscript(transcripts, item.id);
   const isFailed = transcript?.status === "failed";
   const canTranscribe =
     Boolean(onTranscribe) && !isTranscribing && !isCompleted;
@@ -57,6 +65,14 @@ export function AudioNoteItem({
     item.mimeType,
     item.filename,
   );
+
+  function handleTranscribeClick() {
+    if (!onTranscribe || localTranscribing) return;
+    setLocalTranscribing(true);
+    void Promise.resolve(onTranscribe()).finally(() => {
+      setLocalTranscribing(false);
+    });
+  }
 
   return (
     <li className="rounded-lg border border-slate-200 bg-white p-3">
@@ -81,30 +97,32 @@ export function AudioNoteItem({
               </span>
             )}
           </p>
-          {transcript && transcript.status !== "not_started" && (
-            <p className="mt-1 text-[10px] text-slate-500">
-              {STATUS_LABELS[transcript.status]}
-              {isFailed && transcript.error ? ` — ${transcript.error}` : null}
-            </p>
+          {isCompleted && (
+            <p className="mt-1 text-[10px] text-slate-500">Transcribed</p>
           )}
-          {transcript?.status === "not_started" && (
+          {isTranscribing && (
+            <p className="mt-1 text-[10px] text-slate-500">Transcribing…</p>
+          )}
+          {!isCompleted && !isTranscribing && !isFailed && (
             <p className="mt-1 text-[10px] text-slate-500">Not transcribed</p>
+          )}
+          {isFailed && (
+            <p className="mt-1 text-[10px] text-red-600">
+              {STATUS_LABELS.failed}
+              {transcript?.error ? ` — ${transcript.error}` : null}
+            </p>
           )}
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           {canTranscribe && (
             <button
               type="button"
-              onClick={onTranscribe}
-              className="rounded-md bg-slate-100 px-2 py-1 text-[10px] font-medium text-slate-700 transition-colors hover:bg-slate-200"
+              onClick={handleTranscribeClick}
+              disabled={localTranscribing}
+              className="rounded-md bg-slate-100 px-2 py-1 text-[10px] font-medium text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50"
             >
               {isFailed ? "Retry" : "Transcribe"}
             </button>
-          )}
-          {isTranscribing && (
-            <span className="text-[10px] font-medium text-slate-500">
-              Transcribing…
-            </span>
           )}
           {onRemove && (
             <button
@@ -128,6 +146,12 @@ export function AudioNoteItem({
         saved={!useLocalPlayback}
         useLocalPlayback={useLocalPlayback}
       />
+
+      {isFailed && !isTranscribing && (
+        <p className="mt-2 text-xs text-red-600" role="alert">
+          {transcript?.error ?? TRANSCRIBE_FAILED_MESSAGE}
+        </p>
+      )}
 
       {(isCompleted || isFailed || isTranscribing) && (
         <div className="mt-3 border-t border-slate-100 pt-3">
@@ -156,12 +180,6 @@ export function AudioNoteItem({
                 <div className="animate-pulse rounded-lg bg-slate-100 px-3 py-4 text-xs text-slate-500">
                   Generating transcript…
                 </div>
-              )}
-
-              {isFailed && !isTranscribing && (
-                <p className="text-xs text-red-600" role="alert">
-                  {transcript?.error ?? "Transcription failed."}
-                </p>
               )}
 
               {isCompleted && onUpdateTranscript && (
@@ -193,7 +211,7 @@ export function AudioNoteItem({
         </div>
       )}
 
-      {!transcript && onTranscribe && (
+      {!isCompleted && !isTranscribing && !isFailed && onTranscribe && (
         <p className="mt-2 text-[10px] text-slate-400">
           Transcribe this audio note to convert speech to editable text.
         </p>

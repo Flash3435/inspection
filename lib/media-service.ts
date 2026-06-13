@@ -391,6 +391,23 @@ export async function getMediaBlobForExport(
   return { blob: item.blob, mimeType: item.mimeType };
 }
 
+export async function verifyAudioBelongsToObservation(
+  audioId: string,
+  observationId: string,
+  options: { userId?: string | null; client?: Client | null },
+): Promise<boolean> {
+  const { userId, client } = options;
+  const cloud = getCloudContext(userId, client);
+
+  if (cloud) {
+    const item = await getCloudMediaItem(cloud.client, audioId);
+    return item?.type === "audio" && item.observationId === observationId;
+  }
+
+  const item = await getLocalMediaItem(audioId);
+  return item?.type === "audio";
+}
+
 export async function getAudioMediaForTranscription(
   mediaId: string,
   options: { userId?: string | null; client?: Client | null },

@@ -21,7 +21,7 @@ interface MediaPreviewListProps {
   savedAudioIds?: ReadonlySet<string>;
   onRemovePhoto?: (id: string) => void;
   onRemoveAudio?: (id: string) => void;
-  onTranscribe?: (audioId: string) => void;
+  onTranscribe?: (audioId: string) => void | Promise<void>;
   onUpdateTranscript?: (audioId: string, text: string) => void;
   onClearTranscript?: (audioId: string) => void;
 }
@@ -116,11 +116,14 @@ export function MediaPreviewList({
                   key={item.id}
                   item={playbackItem}
                   transcript={transcript}
+                  transcripts={transcripts}
                   compact={compact}
                   savedLocally={savedAudioIds?.has(item.id) ?? false}
                   useLocalPlayback={useLocalPlayback}
                   onTranscribe={
-                    onTranscribe ? () => onTranscribe(item.id) : undefined
+                    onTranscribe
+                      ? () => onTranscribe(item.id)
+                      : undefined
                   }
                   onUpdateTranscript={
                     onUpdateTranscript

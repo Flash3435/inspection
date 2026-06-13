@@ -36,6 +36,8 @@ import {
   createTranscriptEntry,
   pruneTranscripts,
 } from "@/lib/transcript-utils";
+import { logTranscribe, logTranscribeError } from "@/lib/media-diagnostics";
+import { verifyAudioBelongsToObservation } from "@/lib/media-service";
 import type {
   AudioTranscript,
   Observation,
@@ -95,6 +97,11 @@ interface InspectionContextValue {
     projectId: string,
     observationId: string,
   ) => Promise<Observation>;
+  patchObservationMediaIds: (
+    observationId: string,
+    photoIds: string[],
+    audioIds: string[],
+  ) => void;
   mediaOptions: { userId: string | null; client: ReturnType<typeof useSupabase> | null };
 }
 
@@ -454,6 +461,19 @@ export function InspectionProvider({
     [user, supabase, mediaOptions],
   );
 
+  const patchObservationMediaIds = useCallback(
+    (observationId: string, photoIds: string[], audioIds: string[]) => {
+      setObservations((prev) =>
+        prev.map((obs) =>
+          obs.id === observationId
+            ? { ...obs, photoIds, audioIds, updatedAt: new Date().toISOString() }
+            : obs,
+        ),
+      );
+    },
+    [],
+  );
+
   const persistTranscripts = useCallback(
     async (
       projectId: string,
@@ -488,26 +508,55 @@ export function InspectionProvider({
       audioId: string,
       patch: Partial<AudioTranscript>,
     ) => {
-      const observation = observations.find((o) => o.id === observationId);
-      if (!observation) return;
-
-      const existing = observation.transcripts[audioId];
       const now = new Date().toISOString();
-      const next: AudioTranscript = {
-        ...(existing ?? createTranscriptEntry(audioId)),
-        ...patch,
-        audioId,
-        updatedAt: now,
-      };
+      let transcriptsToPersist: Record<string, AudioTranscript> | null = null;
 
-      const transcripts = {
-        ...observation.transcripts,
-        [audioId]: next,
-      };
+      setObservations((prev) => {
+        const observation = prev.find(
+          (obs) => obs.id === observationId && obs.projectId === projectId,
+        );
+        if (!observation) {
+          logTranscribeError("set_transcript:observation_missing", {
+            projectId,
+            observationId,
+            audioId,
+          });
+          return prev;
+        }
 
-      await persistTranscripts(projectId, observationId, transcripts);
+        const existing = observation.transcripts[audioId];
+        const next: AudioTranscript = {
+          ...(existing ?? createTranscriptEntry(audioId)),
+          ...patch,
+          audioId,
+          updatedAt: now,
+        };
+        const transcripts = {
+          ...observation.transcripts,
+          [audioId]: next,
+        };
+        transcriptsToPersist = transcripts;
+
+        return prev.map((obs) =>
+          obs.id === observationId && obs.projectId === projectId
+            ? { ...obs, transcripts, updatedAt: now }
+            : obs,
+        );
+      });
+
+      if (!transcriptsToPersist) {
+        throw new Error("Observation not found.");
+      }
+
+      if (user) {
+        await updateObservationTranscriptsInDb(
+          supabase,
+          observationId,
+          transcriptsToPersist,
+        );
+      }
     },
-    [observations, persistTranscripts],
+    [user, supabase],
   );
 
   const transcribeObservationAudio = useCallback(
@@ -516,22 +565,52 @@ export function InspectionProvider({
       observationId: string,
       audioId: string,
     ): Promise<void> => {
+      logTranscribe("context:start", {
+        projectId,
+        observationId,
+        audioId,
+      });
+
       const observation = observations.find((o) => o.id === observationId);
       if (!observation || observation.projectId !== projectId) {
         throw new Error("Observation not found.");
       }
 
-      if (!observation.audioIds.includes(audioId)) {
+      const belongsToObservation = await verifyAudioBelongsToObservation(
+        audioId,
+        observationId,
+        mediaOptions,
+      );
+      if (!belongsToObservation) {
         throw new Error("Audio item not found on this observation.");
       }
 
       const key = transcriptionKey(observationId, audioId);
-      if (transcribingRef.current.has(key)) return;
+      if (transcribingRef.current.has(key)) {
+        logTranscribe("context:skip_in_flight", { audioId, observationId });
+        return;
+      }
 
       const current = observation.transcripts[audioId];
-      if (current?.status === "transcribing") return;
+      if (current?.status === "transcribing") {
+        logTranscribe("context:skip_already_transcribing", {
+          audioId,
+          observationId,
+        });
+        return;
+      }
+
+      if (current?.status === "completed" && current.text?.trim()) {
+        logTranscribe("context:skip_completed", { audioId, observationId });
+        return;
+      }
 
       transcribingRef.current.add(key);
+      logTranscribe("context:status_before", {
+        audioId,
+        status: current?.status ?? "none",
+      });
+
       await setTranscript(projectId, observationId, audioId, {
         status: "transcribing",
         error: undefined,
@@ -544,12 +623,18 @@ export function InspectionProvider({
           text,
           error: undefined,
         });
+        logTranscribe("context:success", { audioId, textLength: text.length });
       } catch (err) {
+        const message =
+          err instanceof Error
+            ? err.message
+            : "Could not transcribe this audio note. Please try again.";
         await setTranscript(projectId, observationId, audioId, {
           status: "failed",
-          error:
-            err instanceof Error ? err.message : "Transcription failed.",
+          error: message,
         });
+        logTranscribeError("context:failed", { audioId, observationId }, err);
+        throw err;
       } finally {
         transcribingRef.current.delete(key);
       }
@@ -715,6 +800,7 @@ export function InspectionProvider({
       seedSampleProject,
       refreshData,
       ensureDraftObservation,
+      patchObservationMediaIds,
       mediaOptions,
     }),
     [
@@ -741,6 +827,7 @@ export function InspectionProvider({
       seedSampleProject,
       refreshData,
       ensureDraftObservation,
+      patchObservationMediaIds,
       mediaOptions,
     ],
   );

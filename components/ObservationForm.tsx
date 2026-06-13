@@ -12,7 +12,7 @@ import {
   mapUploadErrorToUserMessage,
   saveMediaItem,
 } from "@/lib/media-service";
-import { logMedia } from "@/lib/media-diagnostics";
+import { logMedia, logTranscribe, logTranscribeError } from "@/lib/media-diagnostics";
 import {
   generateObservationDraft,
   formatDraftSourceSummary,
@@ -21,6 +21,7 @@ import { transcribeAudio } from "@/lib/transcription";
 import {
   pruneTranscripts,
   createTranscriptEntry,
+  getTranscriptForAudio,
 } from "@/lib/transcript-utils";
 import type { AudioTranscript, Observation, ObservationInput } from "@/lib/types";
 import { generateId } from "@/lib/utils";
@@ -66,6 +67,7 @@ export function ObservationForm({
     updateObservationTranscript,
     clearObservationTranscript,
     ensureDraftObservation,
+    patchObservationMediaIds,
     deleteObservation,
     isCloudMode,
   } = useInspection();
@@ -122,28 +124,29 @@ export function ObservationForm({
   const [savedAudioIds, setSavedAudioIds] = useState<Set<string>>(new Set());
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [error, setError] = useState("");
-  const [draftReady, setDraftReady] = useState(isEditing || !isCloudMode);
+  const [cloudDraftReady, setCloudDraftReady] = useState(false);
+  const draftReady = isEditing || !isCloudMode || cloudDraftReady;
 
   const storedObservation = getObservation(observationId);
-  const transcripts =
-    isEditing && storedObservation
-      ? pruneTranscripts(storedObservation.transcripts, form.audioIds)
-      : localTranscripts;
+  const transcripts = pruneTranscripts(
+    {
+      ...(storedObservation?.transcripts ?? {}),
+      ...localTranscripts,
+    },
+    form.audioIds,
+  );
 
   const allMediaIds = [...form.photoIds, ...form.audioIds];
   const { photos, audio, loading: mediaLoading } = useResolvedMedia(allMediaIds);
 
   useEffect(() => {
-    if (isEditing || !isCloudMode) {
-      setDraftReady(true);
-      return;
-    }
+    if (isEditing || !isCloudMode) return;
 
     let cancelled = false;
 
     void ensureDraftObservation(projectId, observationId)
       .then(() => {
-        if (!cancelled) setDraftReady(true);
+        if (!cancelled) setCloudDraftReady(true);
       })
       .catch((err) => {
         if (!cancelled) {
@@ -173,8 +176,15 @@ export function ObservationForm({
   }, [isEditing, observationId, mediaOptions, isCloudMode, deleteObservation]);
 
   useEffect(() => {
-    setLocalTranscripts((prev) => pruneTranscripts(prev, form.audioIds));
-  }, [form.audioIds]);
+    if (!storedObservation) return;
+    patchObservationMediaIds(observationId, form.photoIds, form.audioIds);
+  }, [
+    observationId,
+    form.photoIds,
+    form.audioIds,
+    storedObservation,
+    patchObservationMediaIds,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -400,14 +410,68 @@ export function ObservationForm({
   async function handleTranscribe(audioId: string) {
     setError("");
 
-    if (isEditing) {
+    const before = getTranscriptForAudio(transcripts, audioId);
+    logTranscribe("click", {
+      audioId,
+      projectId,
+      observationId,
+      isEditing,
+      hasStoredObservation: Boolean(storedObservation),
+      isCloudMode,
+      handler: storedObservation ? "context" : isCloudMode ? "unavailable" : "local",
+      statusBefore: before?.status ?? "none",
+    });
+
+    if (storedObservation) {
+      setLocalTranscripts((prev) => ({
+        ...prev,
+        [audioId]: createTranscriptEntry(audioId, { status: "transcribing" }),
+      }));
+
       try {
         await transcribeObservationAudio(projectId, observationId, audioId);
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Transcription failed.",
+        const after = getTranscriptForAudio(
+          getObservation(observationId)?.transcripts ?? {},
+          audioId,
         );
+        logTranscribe("click:after_context", {
+          audioId,
+          statusAfter: after?.status ?? "none",
+        });
+        setLocalTranscripts((prev) => {
+          const next = { ...prev };
+          delete next[audioId];
+          return next;
+        });
+      } catch (err) {
+        const message =
+          err instanceof Error
+            ? err.message
+            : "Could not transcribe this audio note. Please try again.";
+        logTranscribeError("click:context_failed", { audioId }, err);
+        setLocalTranscripts((prev) => ({
+          ...prev,
+          [audioId]: createTranscriptEntry(audioId, {
+            status: "failed",
+            error: message,
+          }),
+        }));
+        setError(message);
       }
+      return;
+    }
+
+    if (isCloudMode) {
+      const message = "Transcription is not available until the observation is saved.";
+      logTranscribe("click:unavailable", { audioId, observationId });
+      setLocalTranscripts((prev) => ({
+        ...prev,
+        [audioId]: createTranscriptEntry(audioId, {
+          status: "failed",
+          error: message,
+        }),
+      }));
+      setError(message);
       return;
     }
 
@@ -432,23 +496,31 @@ export function ObservationForm({
           updatedAt: now,
         },
       }));
+      logTranscribe("click:local_success", {
+        audioId,
+        textLength: text.length,
+      });
     } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Could not transcribe this audio note. Please try again.";
       setLocalTranscripts((prev) => ({
         ...prev,
         [audioId]: {
           ...(prev[audioId] ?? createTranscriptEntry(audioId)),
           status: "failed",
-          error:
-            err instanceof Error ? err.message : "Transcription failed.",
+          error: message,
         },
       }));
+      logTranscribeError("click:local_failed", { audioId }, err);
     } finally {
       transcribingLocalRef.current.delete(audioId);
     }
   }
 
   function handleUpdateTranscript(audioId: string, text: string) {
-    if (isEditing) {
+    if (storedObservation) {
       updateObservationTranscript(projectId, observationId, audioId, text);
       return;
     }
@@ -465,7 +537,7 @@ export function ObservationForm({
   }
 
   function handleClearTranscript(audioId: string) {
-    if (isEditing) {
+    if (storedObservation) {
       clearObservationTranscript(projectId, observationId, audioId);
       return;
     }

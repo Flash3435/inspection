@@ -61,6 +61,28 @@ export function logAudioError(
   });
 }
 
+const TRANSCRIBE_LOG_PREFIX = "[transcribe]";
+
+export function logTranscribe(
+  step: string,
+  details: Record<string, unknown>,
+): void {
+  if (typeof console === "undefined") return;
+  console.info(TRANSCRIBE_LOG_PREFIX, step, details);
+}
+
+export function logTranscribeError(
+  step: string,
+  details: Record<string, unknown>,
+  err?: unknown,
+): void {
+  if (typeof console === "undefined") return;
+  console.error(TRANSCRIBE_LOG_PREFIX, step, {
+    ...details,
+    error: err ? safeErrorMessage(err) : undefined,
+  });
+}
+
 export function logMediaError(
   step: string,
   details: Record<string, unknown>,
