@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { DISCIPLINE_LABELS } from "@/lib/constants";
 import type { Observation } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
@@ -59,7 +60,10 @@ export function ObservationCard({
   const photoCount = observation.photoIds.length;
   const audioCount = observation.audioIds.length;
   const allMediaIds = [...observation.photoIds, ...observation.audioIds];
-  const { photos, audio, loading } = useResolvedMedia(allMediaIds);
+  const [showMedia, setShowMedia] = useState(false);
+  const { photos, audio, loading } = useResolvedMedia(
+    showMedia ? allMediaIds : [],
+  );
 
   return (
     <article className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -152,35 +156,47 @@ export function ObservationCard({
 
       {allMediaIds.length > 0 && (
         <div className="mt-3">
-          <MediaPreviewList
-            photos={photos}
-            audio={audio}
-            loading={loading}
-            transcripts={observation.transcripts}
-            compact
-            onTranscribe={(audioId) =>
-              void transcribeObservationAudio(
-                observation.projectId,
-                observation.id,
-                audioId,
-              )
-            }
-            onUpdateTranscript={(audioId, text) =>
-              updateObservationTranscript(
-                observation.projectId,
-                observation.id,
-                audioId,
-                text,
-              )
-            }
-            onClearTranscript={(audioId) =>
-              clearObservationTranscript(
-                observation.projectId,
-                observation.id,
-                audioId,
-              )
-            }
-          />
+          {!showMedia ? (
+            <button
+              type="button"
+              onClick={() => setShowMedia(true)}
+              className="text-xs font-medium text-slate-600 transition-colors hover:text-slate-900"
+            >
+              Show media ({photoCount > 0 ? `${photoCount} photo${photoCount !== 1 ? "s" : ""}` : ""}
+              {photoCount > 0 && audioCount > 0 ? ", " : ""}
+              {audioCount > 0 ? `${audioCount} audio` : ""})
+            </button>
+          ) : (
+            <MediaPreviewList
+              photos={photos}
+              audio={audio}
+              loading={loading}
+              transcripts={observation.transcripts}
+              compact
+              onTranscribe={(audioId) =>
+                void transcribeObservationAudio(
+                  observation.projectId,
+                  observation.id,
+                  audioId,
+                )
+              }
+              onUpdateTranscript={(audioId, text) =>
+                updateObservationTranscript(
+                  observation.projectId,
+                  observation.id,
+                  audioId,
+                  text,
+                )
+              }
+              onClearTranscript={(audioId) =>
+                clearObservationTranscript(
+                  observation.projectId,
+                  observation.id,
+                  audioId,
+                )
+              }
+            />
+          )}
         </div>
       )}
     </article>

@@ -164,41 +164,80 @@ export function ObservationForm({
     };
   }, [isEditing, isCloudMode, projectId, observationId, ensureDraftObservation]);
 
-  useEffect(() => {
-    return () => {
-      if (!isEditing && !submittedRef.current) {
-        if (isCloudMode) {
-          void deleteObservation(observationId);
-        } else {
-          void deleteMediaForObservation(observationId, mediaOptions);
-        }
-      }
-    };
-  }, [isEditing, observationId, mediaOptions, isCloudMode, deleteObservation]);
+  const photoIdsKey = form.photoIds.join(",");
+  const audioIdsKey = form.audioIds.join(",");
+
+  const abandonRef = useRef({
+    observationId,
+    isEditing,
+    isCloudMode,
+    deleteObservation,
+    deleteMediaForObservation,
+    mediaOptions,
+  });
 
   useEffect(() => {
-    if (!storedObservation) return;
+    abandonRef.current = {
+      observationId,
+      isEditing,
+      isCloudMode,
+      deleteObservation,
+      deleteMediaForObservation,
+      mediaOptions,
+    };
+  });
+
+  useEffect(() => {
+    return () => {
+      const {
+        observationId: id,
+        isEditing: editing,
+        isCloudMode: cloud,
+        deleteObservation: removeObservation,
+        deleteMediaForObservation: removeMedia,
+        mediaOptions: options,
+      } = abandonRef.current;
+      if (editing || submittedRef.current) return;
+      if (cloud) {
+        void removeObservation(id);
+      } else {
+        void removeMedia(id, options);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!draftReady) return;
     logMedia("form:patch_media_ids", {
       observationId,
       photoCount: form.photoIds.length,
       audioCount: form.audioIds.length,
     });
     patchObservationMediaIds(observationId, form.photoIds, form.audioIds);
+    // photoIdsKey/audioIdsKey track form.photoIds/form.audioIds without array identity churn
   }, [
     observationId,
+    photoIdsKey,
+    audioIdsKey,
+    draftReady,
+    patchObservationMediaIds,
     form.photoIds,
     form.audioIds,
-    storedObservation,
-    patchObservationMediaIds,
   ]);
+
+  const localAudioPlaybackRef = useRef(localAudioPlayback);
+
+  useEffect(() => {
+    localAudioPlaybackRef.current = localAudioPlayback;
+  }, [localAudioPlayback]);
 
   useEffect(() => {
     return () => {
-      Object.values(localAudioPlayback).forEach((entry) => {
+      Object.values(localAudioPlaybackRef.current).forEach((entry) => {
         URL.revokeObjectURL(entry.url);
       });
     };
-  }, [localAudioPlayback]);
+  }, []);
 
   function cacheLocalAudioPlayback(
     mediaId: string,

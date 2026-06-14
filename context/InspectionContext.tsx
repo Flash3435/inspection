@@ -112,6 +112,11 @@ function getRemovedIds(previous: string[], next: string[]): string[] {
   return previous.filter((id) => !nextSet.has(id));
 }
 
+function arraysEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((id, index) => id === b[index]);
+}
+
 function transcriptionKey(observationId: string, audioId: string): string {
   return `${observationId}:${audioId}`;
 }
@@ -464,11 +469,21 @@ export function InspectionProvider({
   const patchObservationMediaIds = useCallback(
     (observationId: string, photoIds: string[], audioIds: string[]) => {
       setObservations((prev) =>
-        prev.map((obs) =>
-          obs.id === observationId
-            ? { ...obs, photoIds, audioIds, updatedAt: new Date().toISOString() }
-            : obs,
-        ),
+        prev.map((obs) => {
+          if (obs.id !== observationId) return obs;
+          if (
+            arraysEqual(obs.photoIds, photoIds) &&
+            arraysEqual(obs.audioIds, audioIds)
+          ) {
+            return obs;
+          }
+          return {
+            ...obs,
+            photoIds,
+            audioIds,
+            updatedAt: new Date().toISOString(),
+          };
+        }),
       );
     },
     [],
