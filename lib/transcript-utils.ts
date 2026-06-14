@@ -49,3 +49,32 @@ export function hasCompletedTranscript(
   const entry = getTranscriptForAudio(transcripts, audioId);
   return entry?.status === "completed" && Boolean(entry.text?.trim());
 }
+
+/** JSON-safe transcript entry for Postgres jsonb (no undefined values). */
+export function serializeTranscriptEntry(
+  transcript: AudioTranscript,
+  options?: { clearError?: boolean },
+): AudioTranscript {
+  const entry: AudioTranscript = {
+    audioId: transcript.audioId,
+    text: transcript.text,
+    status: transcript.status,
+  };
+  if (!options?.clearError && transcript.error) {
+    entry.error = transcript.error;
+  }
+  if (transcript.createdAt) entry.createdAt = transcript.createdAt;
+  if (transcript.updatedAt) entry.updatedAt = transcript.updatedAt;
+  return entry;
+}
+
+export function serializeTranscriptsForDb(
+  transcripts: Record<string, AudioTranscript>,
+): Record<string, AudioTranscript> {
+  return Object.fromEntries(
+    Object.entries(transcripts).map(([audioId, transcript]) => [
+      audioId,
+      serializeTranscriptEntry(transcript),
+    ]),
+  );
+}

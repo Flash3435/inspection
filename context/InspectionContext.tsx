@@ -36,6 +36,7 @@ import { transcribeAudio } from "@/lib/transcription";
 import {
   createTranscriptEntry,
   pruneTranscripts,
+  serializeTranscriptEntry,
 } from "@/lib/transcript-utils";
 import { logTranscribe, logTranscribeError } from "@/lib/media-diagnostics";
 import {
@@ -45,6 +46,7 @@ import {
   TranscriptionError,
   transcriptionErrorMessage,
   TRANSCRIPTION_USER_MESSAGES,
+  mapTranscriptDbError,
 } from "@/lib/transcription-errors";
 import type {
   AudioTranscript,
@@ -617,77 +619,102 @@ export function InspectionProvider({
     ) => {
       const ensured = await ensureObservationInContext(projectId, observationId);
       const now = new Date().toISOString();
-      let transcriptsToPersist: Record<string, AudioTranscript> | null = null;
 
-      setObservations((prev) => {
-        const observation =
-          prev.find(
-            (obs) => obs.id === observationId && obs.projectId === projectId,
-          ) ?? ensured;
-        if (!observation) {
-          logTranscribeError("set_transcript:observation_missing", {
-            projectId,
-            observationId,
-            audioId,
-          });
-          return prev;
-        }
+      const currentObservation =
+        observationsRef.current.find(
+          (obs) => obs.id === observationId && obs.projectId === projectId,
+        ) ?? ensured;
 
-        const existing = observation.transcripts[audioId];
-        const next: AudioTranscript = {
+      logTranscribe("set_transcript:start", {
+        projectId,
+        observationId,
+        audioId,
+        userId: user?.id,
+        observationLoaded: Boolean(currentObservation),
+        currentTranscriptCount: Object.keys(currentObservation.transcripts).length,
+        patchStatus: patch.status,
+        patchTextLength: patch.text?.length ?? 0,
+      });
+
+      const existing = currentObservation.transcripts[audioId];
+      const next = serializeTranscriptEntry(
+        {
           ...(existing ?? createTranscriptEntry(audioId)),
           ...patch,
           audioId,
           updatedAt: now,
-        };
-        const transcripts = {
-          ...observation.transcripts,
-          [audioId]: next,
-        };
-        transcriptsToPersist = transcripts;
+        },
+        { clearError: patch.error === undefined },
+      );
 
+      const mergedTranscripts = {
+        ...currentObservation.transcripts,
+        [audioId]: next,
+      };
+
+      setObservations((prev) => {
         const hasObservation = prev.some(
           (obs) => obs.id === observationId && obs.projectId === projectId,
         );
 
         if (!hasObservation) {
           return [
-            { ...ensured, transcripts, updatedAt: now },
+            {
+              ...currentObservation,
+              transcripts: mergedTranscripts,
+              updatedAt: now,
+            },
             ...prev,
           ];
         }
 
         return prev.map((obs) =>
           obs.id === observationId && obs.projectId === projectId
-            ? { ...obs, transcripts, updatedAt: now }
+            ? { ...obs, transcripts: mergedTranscripts, updatedAt: now }
             : obs,
         );
       });
 
-      if (!transcriptsToPersist) {
-        throw new TranscriptionError(
-          "transcript_save_failed",
-          TRANSCRIPTION_USER_MESSAGES.transcript_save_failed,
-        );
-      }
-
       if (user) {
         try {
-          await updateObservationTranscriptsInDb(
+          const persisted = await updateObservationTranscriptsInDb(
             supabase,
             observationId,
-            transcriptsToPersist,
+            mergedTranscripts,
+            {
+              userId: user.id,
+              projectId,
+              audioId,
+            },
           );
+
+          setObservations((prev) =>
+            prev.map((obs) =>
+              obs.id === observationId && obs.projectId === projectId
+                ? { ...obs, transcripts: persisted, updatedAt: now }
+                : obs,
+            ),
+          );
+
+          logTranscribe("set_transcript:success", {
+            projectId,
+            observationId,
+            audioId,
+            status: next.status,
+            textLength: next.text.length,
+          });
         } catch (err) {
           logTranscribeError(
             "set_transcript:db_failed",
-            { projectId, observationId, audioId },
+            {
+              projectId,
+              observationId,
+              audioId,
+              userId: user.id,
+            },
             err,
           );
-          throw new TranscriptionError(
-            "transcript_save_failed",
-            TRANSCRIPTION_USER_MESSAGES.transcript_save_failed,
-          );
+          throw mapTranscriptDbError(err);
         }
       }
     },
@@ -828,10 +855,18 @@ export function InspectionProvider({
         });
       } catch (err) {
         const message = transcriptionErrorMessage(err);
-        await setTranscript(projectId, targetObservationId, audioId, {
-          status: "failed",
-          error: message,
-        });
+        try {
+          await setTranscript(projectId, targetObservationId, audioId, {
+            status: "failed",
+            error: message,
+          });
+        } catch (saveErr) {
+          logTranscribeError(
+            "context:failed_status_save",
+            { audioId, observationId: targetObservationId },
+            saveErr,
+          );
+        }
         logTranscribeError(
           "context:failed",
           { audioId, observationId: targetObservationId },

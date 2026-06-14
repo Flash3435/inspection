@@ -9,7 +9,8 @@ import {
   projectToInsertRow,
   projectInputToUpdateRow,
 } from "./mappers";
-import { logMedia } from "@/lib/media-diagnostics";
+import { logMedia, logTranscribe, logTranscribeError } from "@/lib/media-diagnostics";
+import { serializeTranscriptsForDb } from "@/lib/transcript-utils";
 import type { Observation, ObservationInput, Project, ProjectInput } from "@/lib/types";
 import { generateId } from "@/lib/utils";
 
@@ -324,7 +325,10 @@ export async function upsertObservationTranscriptByMediaId(
     [audioId]: transcript,
   };
 
-  await updateObservationTranscriptsInDb(client, observation.id, transcripts);
+  await updateObservationTranscriptsInDb(client, observation.id, transcripts, {
+    projectId,
+    audioId,
+  });
   return { observationId: observation.id, transcripts };
 }
 
@@ -343,10 +347,67 @@ export async function updateObservationTranscriptsInDb(
   client: Client,
   observationId: string,
   transcripts: Observation["transcripts"],
-): Promise<void> {
-  const { error } = await client
+  context?: { userId?: string; projectId?: string; audioId?: string },
+): Promise<Observation["transcripts"]> {
+  const sanitized = serializeTranscriptsForDb(transcripts);
+  const transcriptKeys = Object.keys(sanitized);
+  const sampleEntry = transcriptKeys[0]
+    ? sanitized[transcriptKeys[0]]
+    : undefined;
+
+  logTranscribe("db:update_start", {
+    observationId,
+    projectId: context?.projectId,
+    audioId: context?.audioId,
+    userId: context?.userId,
+    transcriptCount: transcriptKeys.length,
+    transcriptKeys,
+    sampleStatus: sampleEntry?.status,
+    sampleTextLength: sampleEntry?.text?.length ?? 0,
+  });
+
+  const { data, error } = await client
     .from("observations")
-    .update({ transcripts: transcripts as never })
-    .eq("id", observationId);
-  if (error) throw error;
+    .update({ transcripts: sanitized as never })
+    .eq("id", observationId)
+    .select("id, transcripts, user_id, project_id")
+    .maybeSingle();
+
+  if (error) {
+    logTranscribeError(
+      "db:update_failed",
+      {
+        observationId,
+        projectId: context?.projectId,
+        audioId: context?.audioId,
+        userId: context?.userId,
+        code: error.code,
+        message: error.message,
+        details: error.details,
+        hint: error.hint,
+      },
+      error,
+    );
+    throw error;
+  }
+
+  if (!data) {
+    logTranscribeError("db:update_no_row", {
+      observationId,
+      projectId: context?.projectId,
+      audioId: context?.audioId,
+      userId: context?.userId,
+      hint: "RLS may have blocked update or observation id mismatch",
+    });
+    throw new Error("Observation transcript update matched no rows.");
+  }
+
+  logTranscribe("db:update_success", {
+    observationId,
+    projectId: data.project_id,
+    rowUserId: data.user_id,
+    transcriptCount: transcriptKeys.length,
+  });
+
+  return (data.transcripts ?? sanitized) as unknown as Observation["transcripts"];
 }
