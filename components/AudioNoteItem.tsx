@@ -8,6 +8,7 @@ import {
   formatAudioFormatLabel,
   isLikelyUnsupportedPlayback,
 } from "@/lib/media-utils";
+import { isDemoTranscriptText } from "@/lib/transcription-demo";
 import { hasCompletedTranscript } from "@/lib/transcript-utils";
 import { formatDateTime } from "@/lib/utils";
 
@@ -67,6 +68,8 @@ export function AudioNoteItem({
     item.mimeType,
     item.filename,
   );
+  const isDemoTranscript =
+    Boolean(transcript?.text) && isDemoTranscriptText(transcript?.text ?? "");
 
   function handleTranscribeClick() {
     if (!onTranscribe || localTranscribing) return;
@@ -182,9 +185,11 @@ export function AudioNoteItem({
                 <label className="text-[10px] font-medium uppercase tracking-wide text-slate-400">
                   Transcript
                 </label>
-                <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
-                  Demo transcription
-                </span>
+                {isDemoTranscript && (
+                  <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                    Demo transcription
+                  </span>
+                )}
               </div>
 
               {isTranscribing && (

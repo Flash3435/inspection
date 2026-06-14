@@ -1,17 +1,31 @@
 import { logAudio, logAudioError } from "@/lib/media-diagnostics";
+import { generateDemoTranscript } from "./transcription-demo";
 import { getAudioMediaForTranscription } from "./media-service";
-import { formatDateTime } from "./utils";
 
 export interface TranscriptionMediaOptions {
   userId?: string | null;
   client: import("@supabase/supabase-js").SupabaseClient | null;
 }
 
+interface TranscribeAudioApiResponse {
+  text: string;
+  audioId: string;
+  duration?: number;
+  model: string;
+  generatedAt: string;
+  filename?: string;
+}
+
+interface TranscribeAudioApiError {
+  error: string;
+  code?: string;
+}
+
 /**
- * Transcribe an audio media item by ID.
+ * Transcribe an audio media item by ID via the server-side OpenAI route.
  *
- * Loads audio from storage by mediaId — does not depend on browser playback.
- * TODO: Replace the mock implementation below with a real speech-to-text provider.
+ * Falls back to demo transcription in local development when the API key
+ * is not configured.
  */
 export async function transcribeAudio(
   mediaId: string,
@@ -23,16 +37,13 @@ export async function transcribeAudio(
     hasSession: Boolean(mediaOptions?.userId && mediaOptions?.client),
   });
 
-  const media = mediaOptions
-    ? await getAudioMediaForTranscription(mediaId, mediaOptions)
-    : null;
+  if (mediaOptions) {
+    const media = await getAudioMediaForTranscription(mediaId, mediaOptions);
+    if (!media) {
+      logAudioError("transcribe:not_found", { mediaId });
+      throw new Error("Could not load the saved audio for transcription.");
+    }
 
-  if (mediaOptions && !media) {
-    logAudioError("transcribe:not_found", { mediaId });
-    throw new Error("Could not load the saved audio for transcription.");
-  }
-
-  if (media) {
     logAudio("transcribe:loaded", {
       mediaId,
       filename: media.filename,
@@ -43,21 +54,60 @@ export async function transcribeAudio(
   }
 
   try {
-    await delay(1200);
+    const response = await fetch("/api/transcribe-audio", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ audioId: mediaId }),
+    });
 
-    const recordedDate = media
-      ? formatDateTime(media.createdAt)
-      : "the recording time";
-    const text = `Sample transcript for audio note recorded on ${recordedDate}. Edit this text to reflect what was said on site.`;
+    let payload: TranscribeAudioApiResponse | TranscribeAudioApiError;
+    try {
+      payload = (await response.json()) as
+        | TranscribeAudioApiResponse
+        | TranscribeAudioApiError;
+    } catch {
+      throw new Error("Could not transcribe this audio note. Please try again.");
+    }
 
-    logAudio("transcribe:success", { mediaId, textLength: text.length });
-    return text;
+    if (response.ok && "text" in payload && typeof payload.text === "string") {
+      logAudio("transcribe:success", {
+        mediaId,
+        textLength: payload.text.length,
+        model: payload.model,
+      });
+      return payload.text;
+    }
+
+    const apiError = payload as TranscribeAudioApiError;
+    const code = apiError.code;
+    const message =
+      apiError.error?.trim() ||
+      "Could not transcribe this audio note. Please try again.";
+
+    if (
+      (response.status === 503 || code === "not_configured") &&
+      process.env.NODE_ENV !== "production"
+    ) {
+      logAudio("transcribe:fallback_demo", { mediaId, reason: message });
+      return generateDemoTranscript(mediaId, mediaOptions);
+    }
+
+    if (response.status === 401 || code === "session_expired") {
+      throw new Error("Please sign in again.");
+    }
+
+    logAudioError("transcribe:api_failed", {
+      mediaId,
+      status: response.status,
+      code,
+      message,
+    });
+    throw new Error(message);
   } catch (err) {
+    if (err instanceof Error) {
+      throw err;
+    }
     logAudioError("transcribe:failed", { mediaId }, err);
-    throw err;
+    throw new Error("Could not transcribe this audio note. Please try again.");
   }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
