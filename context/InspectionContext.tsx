@@ -20,6 +20,7 @@ import {
   deleteProjectFromDb,
   fetchAllObservations,
   fetchAllProjects,
+  getObservationById,
   insertObservation,
   insertProject,
   updateObservationInDb,
@@ -37,7 +38,14 @@ import {
   pruneTranscripts,
 } from "@/lib/transcript-utils";
 import { logTranscribe, logTranscribeError } from "@/lib/media-diagnostics";
-import { verifyAudioBelongsToObservation } from "@/lib/media-service";
+import {
+  resolveAudioForTranscription,
+} from "@/lib/media-service";
+import {
+  TranscriptionError,
+  transcriptionErrorMessage,
+  TRANSCRIPTION_USER_MESSAGES,
+} from "@/lib/transcription-errors";
 import type {
   AudioTranscript,
   Observation,
@@ -151,6 +159,11 @@ export function InspectionProvider({
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
   const [syncError, setSyncError] = useState<string | null>(null);
   const transcribingRef = useRef(new Set<string>());
+  const observationsRef = useRef(observations);
+
+  useEffect(() => {
+    observationsRef.current = observations;
+  }, [observations]);
 
   const isCloudMode = Boolean(user);
   const mediaOptions = useMemo(
@@ -335,12 +348,22 @@ export function InspectionProvider({
 
   const ensureDraftObservation = useCallback(
     async (projectId: string, observationId: string): Promise<Observation> => {
-      const existing = observations.find((obs) => obs.id === observationId);
-      if (existing) return existing;
+      const existing = observationsRef.current.find(
+        (obs) => obs.id === observationId,
+      );
+      if (existing) {
+        logTranscribe("draft:already_in_context", {
+          projectId,
+          observationId,
+        });
+        return existing;
+      }
 
       if (!user) {
         throw new Error("Sign in to add observations.");
       }
+
+      logTranscribe("draft:create_start", { projectId, observationId });
 
       const observation = await insertObservation(
         supabase,
@@ -366,9 +389,78 @@ export function InspectionProvider({
         return [observation, ...prev];
       });
 
+      logTranscribe("draft:create_success", {
+        projectId,
+        observationId: observation.id,
+      });
+
       return observation;
     },
-    [observations, user, supabase],
+    [user, supabase],
+  );
+
+  const ensureObservationInContext = useCallback(
+    async (projectId: string, observationId: string): Promise<Observation> => {
+      const cached = observationsRef.current.find(
+        (obs) => obs.id === observationId && obs.projectId === projectId,
+      );
+      if (cached) {
+        logTranscribe("ensure_observation:context_hit", {
+          projectId,
+          observationId,
+        });
+        return cached;
+      }
+
+      if (!user) {
+        throw new TranscriptionError(
+          "observation_missing",
+          TRANSCRIPTION_USER_MESSAGES.observation_missing,
+        );
+      }
+
+      logTranscribe("ensure_observation:fetch_start", {
+        projectId,
+        observationId,
+      });
+
+      const fetched = await getObservationById(
+        supabase,
+        projectId,
+        observationId,
+      );
+
+      if (!fetched) {
+        logTranscribeError("ensure_observation:not_in_db", {
+          projectId,
+          observationId,
+        });
+        throw new TranscriptionError(
+          "observation_missing",
+          TRANSCRIPTION_USER_MESSAGES.observation_missing,
+        );
+      }
+
+      setObservations((prev) => {
+        const index = prev.findIndex((obs) => obs.id === observationId);
+        if (index >= 0) {
+          return prev.map((obs) =>
+            obs.id === observationId ? { ...obs, ...fetched } : obs,
+          );
+        }
+        return [fetched, ...prev];
+      });
+
+      logTranscribe("ensure_observation:fetch_success", {
+        projectId,
+        observationId,
+        audioCount: fetched.audioIds.length,
+        photoCount: fetched.photoIds.length,
+      });
+
+      return fetched;
+    },
+    [user, supabase],
   );
 
   const updateObservation = useCallback(
@@ -523,13 +615,15 @@ export function InspectionProvider({
       audioId: string,
       patch: Partial<AudioTranscript>,
     ) => {
+      const ensured = await ensureObservationInContext(projectId, observationId);
       const now = new Date().toISOString();
       let transcriptsToPersist: Record<string, AudioTranscript> | null = null;
 
       setObservations((prev) => {
-        const observation = prev.find(
-          (obs) => obs.id === observationId && obs.projectId === projectId,
-        );
+        const observation =
+          prev.find(
+            (obs) => obs.id === observationId && obs.projectId === projectId,
+          ) ?? ensured;
         if (!observation) {
           logTranscribeError("set_transcript:observation_missing", {
             projectId,
@@ -552,6 +646,17 @@ export function InspectionProvider({
         };
         transcriptsToPersist = transcripts;
 
+        const hasObservation = prev.some(
+          (obs) => obs.id === observationId && obs.projectId === projectId,
+        );
+
+        if (!hasObservation) {
+          return [
+            { ...ensured, transcripts, updatedAt: now },
+            ...prev,
+          ];
+        }
+
         return prev.map((obs) =>
           obs.id === observationId && obs.projectId === projectId
             ? { ...obs, transcripts, updatedAt: now }
@@ -560,18 +665,33 @@ export function InspectionProvider({
       });
 
       if (!transcriptsToPersist) {
-        throw new Error("Observation not found.");
+        throw new TranscriptionError(
+          "transcript_save_failed",
+          TRANSCRIPTION_USER_MESSAGES.transcript_save_failed,
+        );
       }
 
       if (user) {
-        await updateObservationTranscriptsInDb(
-          supabase,
-          observationId,
-          transcriptsToPersist,
-        );
+        try {
+          await updateObservationTranscriptsInDb(
+            supabase,
+            observationId,
+            transcriptsToPersist,
+          );
+        } catch (err) {
+          logTranscribeError(
+            "set_transcript:db_failed",
+            { projectId, observationId, audioId },
+            err,
+          );
+          throw new TranscriptionError(
+            "transcript_save_failed",
+            TRANSCRIPTION_USER_MESSAGES.transcript_save_failed,
+          );
+        }
       }
     },
-    [user, supabase],
+    [user, supabase, ensureObservationInContext],
   );
 
   const transcribeObservationAudio = useCallback(
@@ -580,81 +700,156 @@ export function InspectionProvider({
       observationId: string,
       audioId: string,
     ): Promise<void> => {
+      const inContext = observationsRef.current.some(
+        (obs) => obs.id === observationId && obs.projectId === projectId,
+      );
+
       logTranscribe("context:start", {
         projectId,
-        observationId,
+        formObservationId: observationId,
         audioId,
+        inContext,
+        contextObservationCount: observationsRef.current.length,
       });
 
-      const observation = observations.find((o) => o.id === observationId);
-      if (!observation || observation.projectId !== projectId) {
-        throw new Error("Observation not found.");
-      }
-
-      const belongsToObservation = await verifyAudioBelongsToObservation(
+      const resolved = await resolveAudioForTranscription(
         audioId,
-        observationId,
         mediaOptions,
+        { projectId, observationId },
       );
-      if (!belongsToObservation) {
-        throw new Error("Audio item not found on this observation.");
+
+      if (!resolved) {
+        logTranscribeError("context:audio_not_found", {
+          projectId,
+          observationId,
+          audioId,
+        });
+        throw new TranscriptionError(
+          "audio_not_found",
+          TRANSCRIPTION_USER_MESSAGES.audio_not_found,
+        );
       }
 
-      const key = transcriptionKey(observationId, audioId);
+      logTranscribe("context:media_resolved", {
+        audioId,
+        mediaObservationId: resolved.mediaObservationId,
+        mediaProjectId: resolved.projectId,
+        formObservationId: observationId,
+        observationExistsInDb: resolved.observationExistsInDb,
+        belongsToExpectedObservation: resolved.belongsToExpectedObservation,
+      });
+
+      if (resolved.projectId !== projectId) {
+        throw new TranscriptionError(
+          "audio_not_linked",
+          TRANSCRIPTION_USER_MESSAGES.audio_not_linked,
+        );
+      }
+
+      const targetObservationId = resolved.observationId;
+
+      if (observationId !== targetObservationId) {
+        logTranscribe("context:observation_id_mismatch", {
+          formObservationId: observationId,
+          mediaObservationId: targetObservationId,
+          audioId,
+        });
+      }
+
+      if (!resolved.observationExistsInDb) {
+        throw new TranscriptionError(
+          "observation_orphaned",
+          TRANSCRIPTION_USER_MESSAGES.observation_orphaned,
+        );
+      }
+
+      const ensuredObservation = await ensureObservationInContext(
+        projectId,
+        targetObservationId,
+      );
+
+      if (!ensuredObservation.audioIds.includes(audioId)) {
+        patchObservationMediaIds(
+          targetObservationId,
+          ensuredObservation.photoIds,
+          [...ensuredObservation.audioIds, audioId],
+        );
+      }
+
+      const key = transcriptionKey(targetObservationId, audioId);
       if (transcribingRef.current.has(key)) {
-        logTranscribe("context:skip_in_flight", { audioId, observationId });
+        logTranscribe("context:skip_in_flight", {
+          audioId,
+          observationId: targetObservationId,
+        });
         return;
       }
 
-      const current = observation.transcripts[audioId];
+      const current = ensuredObservation.transcripts[audioId];
       if (current?.status === "transcribing") {
         logTranscribe("context:skip_already_transcribing", {
           audioId,
-          observationId,
+          observationId: targetObservationId,
         });
         return;
       }
 
       if (current?.status === "completed" && current.text?.trim()) {
-        logTranscribe("context:skip_completed", { audioId, observationId });
+        logTranscribe("context:skip_completed", {
+          audioId,
+          observationId: targetObservationId,
+        });
         return;
       }
 
       transcribingRef.current.add(key);
       logTranscribe("context:status_before", {
         audioId,
+        observationId: targetObservationId,
         status: current?.status ?? "none",
       });
 
-      await setTranscript(projectId, observationId, audioId, {
-        status: "transcribing",
-        error: undefined,
-      });
-
       try {
+        await setTranscript(projectId, targetObservationId, audioId, {
+          status: "transcribing",
+          error: undefined,
+        });
+
         const text = await transcribeAudio(audioId, mediaOptions);
-        await setTranscript(projectId, observationId, audioId, {
+        await setTranscript(projectId, targetObservationId, audioId, {
           status: "completed",
           text,
           error: undefined,
         });
-        logTranscribe("context:success", { audioId, textLength: text.length });
+        logTranscribe("context:success", {
+          audioId,
+          observationId: targetObservationId,
+          textLength: text.length,
+        });
       } catch (err) {
-        const message =
-          err instanceof Error
-            ? err.message
-            : "Could not transcribe this audio note. Please try again.";
-        await setTranscript(projectId, observationId, audioId, {
+        const message = transcriptionErrorMessage(err);
+        await setTranscript(projectId, targetObservationId, audioId, {
           status: "failed",
           error: message,
         });
-        logTranscribeError("context:failed", { audioId, observationId }, err);
-        throw err;
+        logTranscribeError(
+          "context:failed",
+          { audioId, observationId: targetObservationId },
+          err,
+        );
+        throw err instanceof TranscriptionError
+          ? err
+          : new TranscriptionError("generic", message);
       } finally {
         transcribingRef.current.delete(key);
       }
     },
-    [observations, setTranscript, mediaOptions],
+    [
+      mediaOptions,
+      ensureObservationInContext,
+      patchObservationMediaIds,
+      setTranscript,
+    ],
   );
 
   const updateObservationTranscript = useCallback(

@@ -27,6 +27,10 @@ import {
   type MediaSaveInput,
 } from "@/lib/supabase/media-repository";
 import {
+  observationExistsInDb as checkObservationExistsInDb,
+} from "@/lib/supabase/repository";
+import { logTranscribe } from "@/lib/media-diagnostics";
+import {
   deleteMediaForObservation as deleteLocalMediaForObservation,
   deleteMediaForProject as deleteLocalMediaForProject,
   deleteMediaItem as deleteLocalMediaItem,
@@ -453,6 +457,74 @@ export async function verifyAudioBelongsToObservation(
 
   const item = await getLocalMediaItem(audioId);
   return item?.type === "audio";
+}
+
+export interface ResolvedAudioForTranscription {
+  audioId: string;
+  observationId: string;
+  projectId: string;
+  mediaObservationId: string;
+  observationExistsInDb: boolean;
+  belongsToExpectedObservation: boolean;
+}
+
+export async function resolveAudioForTranscription(
+  audioId: string,
+  options: { userId?: string | null; client?: Client | null },
+  expected?: { projectId?: string; observationId?: string },
+): Promise<ResolvedAudioForTranscription | null> {
+  const { userId, client } = options;
+  const cloud = getCloudContext(userId, client);
+
+  if (!cloud) {
+    const item = await getLocalMediaItem(audioId);
+    if (!item || item.type !== "audio") {
+      logTranscribe("resolve_audio:local_missing", { audioId });
+      return null;
+    }
+
+    return {
+      audioId,
+      observationId: expected?.observationId ?? "",
+      projectId: expected?.projectId ?? "",
+      mediaObservationId: expected?.observationId ?? "",
+      observationExistsInDb: true,
+      belongsToExpectedObservation: true,
+    };
+  }
+
+  const item = await getCloudMediaItem(cloud.client, audioId);
+  if (!item || item.type !== "audio") {
+    logTranscribe("resolve_audio:cloud_missing", { audioId });
+    return null;
+  }
+
+  const observationExistsInDb = await checkObservationExistsInDb(
+    cloud.client,
+    item.projectId,
+    item.observationId,
+  );
+
+  const belongsToExpectedObservation =
+    !expected?.observationId || item.observationId === expected.observationId;
+
+  logTranscribe("resolve_audio:cloud_ok", {
+    audioId,
+    mediaObservationId: item.observationId,
+    mediaProjectId: item.projectId,
+    formObservationId: expected?.observationId,
+    observationExistsInDb,
+    belongsToExpectedObservation,
+  });
+
+  return {
+    audioId,
+    observationId: item.observationId,
+    projectId: item.projectId,
+    mediaObservationId: item.observationId,
+    observationExistsInDb,
+    belongsToExpectedObservation,
+  };
 }
 
 export async function getAudioMediaForTranscription(

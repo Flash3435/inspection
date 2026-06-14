@@ -19,6 +19,10 @@ import {
 } from "@/lib/observation-drafting";
 import { transcribeAudio } from "@/lib/transcription";
 import {
+  TRANSCRIPTION_USER_MESSAGES,
+  transcriptionErrorMessage,
+} from "@/lib/transcription-errors";
+import {
   pruneTranscripts,
   createTranscriptEntry,
   getTranscriptForAudio,
@@ -478,19 +482,37 @@ export function ObservationForm({
   async function handleTranscribe(audioId: string) {
     setError("");
 
+    const ctxObservation = getObservation(observationId);
     const before = getTranscriptForAudio(transcripts, audioId);
     logTranscribe("click", {
       audioId,
       projectId,
-      observationId,
+      formObservationId: observationId,
+      storedObservationId: ctxObservation?.id,
+      inContext: Boolean(ctxObservation),
       isEditing,
-      hasStoredObservation: Boolean(storedObservation),
       isCloudMode,
-      handler: storedObservation ? "context" : isCloudMode ? "unavailable" : "local",
+      draftReady,
+      cloudDraftReady,
+      handler: isCloudMode ? "context" : "local",
       statusBefore: before?.status ?? "none",
     });
 
-    if (storedObservation) {
+    if (isCloudMode) {
+      if (!draftReady) {
+        const message = TRANSCRIPTION_USER_MESSAGES.observation_preparing;
+        logTranscribe("click:draft_not_ready", { audioId, observationId });
+        setLocalTranscripts((prev) => ({
+          ...prev,
+          [audioId]: createTranscriptEntry(audioId, {
+            status: "failed",
+            error: message,
+          }),
+        }));
+        setError(message);
+        return;
+      }
+
       setLocalTranscripts((prev) => ({
         ...prev,
         [audioId]: createTranscriptEntry(audioId, { status: "transcribing" }),
@@ -504,6 +526,7 @@ export function ObservationForm({
         );
         logTranscribe("click:after_context", {
           audioId,
+          observationId,
           statusAfter: after?.status ?? "none",
         });
         setLocalTranscripts((prev) => {
@@ -512,11 +535,8 @@ export function ObservationForm({
           return next;
         });
       } catch (err) {
-        const message =
-          err instanceof Error
-            ? err.message
-            : "Could not transcribe this audio note. Please try again.";
-        logTranscribeError("click:context_failed", { audioId }, err);
+        const message = transcriptionErrorMessage(err);
+        logTranscribeError("click:context_failed", { audioId, observationId }, err);
         setLocalTranscripts((prev) => ({
           ...prev,
           [audioId]: createTranscriptEntry(audioId, {
@@ -526,20 +546,6 @@ export function ObservationForm({
         }));
         setError(message);
       }
-      return;
-    }
-
-    if (isCloudMode) {
-      const message = "Transcription is not available until the observation is saved.";
-      logTranscribe("click:unavailable", { audioId, observationId });
-      setLocalTranscripts((prev) => ({
-        ...prev,
-        [audioId]: createTranscriptEntry(audioId, {
-          status: "failed",
-          error: message,
-        }),
-      }));
-      setError(message);
       return;
     }
 
@@ -569,10 +575,7 @@ export function ObservationForm({
         textLength: text.length,
       });
     } catch (err) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : "Could not transcribe this audio note. Please try again.";
+      const message = transcriptionErrorMessage(err);
       setLocalTranscripts((prev) => ({
         ...prev,
         [audioId]: {

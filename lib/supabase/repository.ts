@@ -244,6 +244,90 @@ export async function updateObservationInDb(
   });
 }
 
+export async function getObservationById(
+  client: Client,
+  projectId: string,
+  observationId: string,
+): Promise<Observation | null> {
+  const { data, error } = await client
+    .from("observations")
+    .select("*")
+    .eq("id", observationId)
+    .eq("project_id", projectId)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return null;
+
+  const { data: mediaRows, error: mediaError } = await client
+    .from("media_items")
+    .select("*")
+    .eq("observation_id", observationId);
+
+  if (mediaError) throw mediaError;
+
+  const mediaByObservation = groupMediaIdsByObservation(mediaRows ?? []);
+  const mediaIds = mediaByObservation.get(observationId) ?? {
+    photoIds: [],
+    audioIds: [],
+  };
+
+  return observationRowToObservation(data, mediaIds);
+}
+
+export async function observationExistsInDb(
+  client: Client,
+  projectId: string,
+  observationId: string,
+): Promise<boolean> {
+  const { data, error } = await client
+    .from("observations")
+    .select("id")
+    .eq("id", observationId)
+    .eq("project_id", projectId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return Boolean(data);
+}
+
+export async function upsertObservationTranscriptByMediaId(
+  client: Client,
+  projectId: string,
+  audioId: string,
+  transcript: Observation["transcripts"][string],
+): Promise<{ observationId: string; transcripts: Observation["transcripts"] } | null> {
+  const { data: mediaRow, error: mediaError } = await client
+    .from("media_items")
+    .select("id, observation_id, project_id, type")
+    .eq("id", audioId)
+    .maybeSingle();
+
+  if (mediaError) throw mediaError;
+  if (
+    !mediaRow ||
+    mediaRow.type !== "audio" ||
+    mediaRow.project_id !== projectId
+  ) {
+    return null;
+  }
+
+  const observation = await getObservationById(
+    client,
+    projectId,
+    mediaRow.observation_id,
+  );
+  if (!observation) return null;
+
+  const transcripts = {
+    ...observation.transcripts,
+    [audioId]: transcript,
+  };
+
+  await updateObservationTranscriptsInDb(client, observation.id, transcripts);
+  return { observationId: observation.id, transcripts };
+}
+
 export async function deleteObservationFromDb(
   client: Client,
   observationId: string,
